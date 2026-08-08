@@ -4,10 +4,9 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
+const { mapClaudeCliReasoningEffort } = require("./reasoning-effort.js");
 
 const MAX_CAPTURE_BYTES = 1024 * 1024;
-const DISABLED_THINKING_FALLBACK_EFFORT = "low";
-
 function findOnPath(name, env = process.env) {
   const directories = String(env.PATH || env.Path || "").split(path.delimiter).filter(Boolean);
   const candidates = process.platform === "win32" && !path.extname(name) ? [".exe", ".com", ".cmd", ".bat"].map(extension => `${name}${extension}`) : [name];
@@ -59,11 +58,12 @@ function sanitizeClaudeEnv(env = process.env, effort = null) {
 
 function buildClaudeArgs({ systemPrompt, model, effort }) {
   const selectedEffort = String(effort || "").trim(), thinkingDisabled = selectedEffort.toLowerCase() === "none",
-    cliEffort = thinkingDisabled ? DISABLED_THINKING_FALLBACK_EFFORT : selectedEffort;
+    cliEffort = selectedEffort ? mapClaudeCliReasoningEffort(selectedEffort.toLowerCase(), model) : "";
   const args = [
     "-p",
     "--input-format", "stream-json",
     "--output-format", "stream-json",
+    "--include-partial-messages",
     "--verbose",
     "--no-session-persistence",
     "--safe-mode",
@@ -162,16 +162,27 @@ function toolUseName(value) {
   return "";
 }
 
-function runProcess(launch, args, input, cwd, env, signal) {
+function claudeResponseEvent(event) {
+  if (event?.type === "assistant") return true;
+  if (event?.type !== "stream_event") return false;
+  return ["message_start", "content_block_start", "content_block_delta", "message_delta", "message_stop"].includes(event?.event?.type);
+}
+
+function runProcess(launch, args, input, cwd, env, signal, onProgress = null, onActivity = null) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(abortError());
     let child;
     try { child = spawn(launch.command, [...launch.prefixArgs, ...args], { cwd, env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, shell: false, detached: process.platform !== "win32" }); }
     catch (error) { reject(error); return; }
-    let termination = null, settled = false, lineBuffer = "", stderr = "";
+    let termination = null, settled = false, lineBuffer = "", stderr = "", responseStarted = false;
     const events = [];
     const terminate = () => termination ||= stopProcessTree(child);
     const traceDiagnostic = () => JSON.stringify({ events, stderr:stderr.slice(-4000) });
+    const reportResponseStarted = () => {
+      if (responseStarted) return;
+      responseStarted = true;
+      try { onProgress?.("receiving"); } catch {}
+    };
     const remember = (event, invalid = false) => {
       const summary = invalid
         ? { type:"invalid-json", preview:String(event).slice(0, 200) }
@@ -209,6 +220,7 @@ function runProcess(launch, args, input, cwd, env, signal) {
       try { event = JSON.parse(line); }
       catch { remember(line, true); return; }
       remember(event);
+      if (claudeResponseEvent(event) || event?.type === "result") reportResponseStarted();
       if (event?.type === "system" && event?.subtype === "init") {
         if (Array.isArray(event.tools) && event.tools.length) return failEarly(new Error(`Claude CLI exposed disabled tools: ${event.tools.map(String).join(", ")}.`));
         if (Array.isArray(event.mcp_servers) && event.mcp_servers.length) return failEarly(new Error("Claude CLI connected MCP servers despite strict isolation."));
@@ -226,6 +238,7 @@ function runProcess(launch, args, input, cwd, env, signal) {
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", chunk => {
       if (settled) return;
+      try { onActivity?.(); } catch {}
       lineBuffer += chunk;
       let newline;
       while ((newline = lineBuffer.indexOf("\n")) >= 0 && !settled) {
@@ -260,12 +273,12 @@ function runProcess(launch, args, input, cwd, env, signal) {
   });
 }
 
-async function callClaudeCli({ executable, model, effort, systemPrompt, prompt, atlasImage, signal, env = process.env }) {
+async function callClaudeCli({ executable, model, effort, systemPrompt, prompt, atlasImage, signal, env = process.env, onProgress = null, onActivity = null }) {
   const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "penecho-claude-"));
   let caughtError = null, cleanupReady = Promise.resolve(), deferCleanup = false;
   try {
     await fs.promises.chmod(workDir, 0o700).catch(() => {});
-    const launch = resolveClaudeLaunch(executable, env), args = buildClaudeArgs({ systemPrompt, model, effort }), input = claudeInput(prompt, atlasImage), childEnv = sanitizeClaudeEnv(env, effort), result = await runProcess(launch, args, input, workDir, childEnv, signal);
+    const launch = resolveClaudeLaunch(executable, env), args = buildClaudeArgs({ systemPrompt, model, effort }), input = claudeInput(prompt, atlasImage), childEnv = sanitizeClaudeEnv(env, effort), result = await runProcess(launch, args, input, workDir, childEnv, signal, onProgress, onActivity);
     cleanupReady = result.cleanupReady || cleanupReady;
     deferCleanup = Boolean(result.deferCleanup);
     if (signal?.aborted) throw abortError();

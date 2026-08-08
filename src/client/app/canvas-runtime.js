@@ -1,7 +1,39 @@
 // Canvas tiles, widgets, animations, rendering, navigation, and text editing.
   const WIDGET_REFINE_PROXIMITY_PX = 24;
+  const WIDGET_REFINE_HOVER_GRACE_MS = 5000;
+  const WIDGET_REFINE_HINT_MS = 10000;
+  const WIDGET_REFINE_CLICK_PULSE_MS = 900;
+  const HAND_OBJECT_TOOLBAR_VISIBLE_MS = 10000;
+  const HAND_OBJECT_TOOLBAR_FADE_MS = 220;
+  const HAND_WIDGET_GESTURE_RESET_TAP_PX = 8;
+  // TEMP: Keep enabled only while visually validating dirty-region shrinking.
+  const SHOW_DIRTY_MASK_DEBUG_BOUNDS = false;
   const objectChromeButtons = new Map();
+  const widgetRefineTouchCandidates = new Map();
+  let widgetRefineConfirmationElement = null;
+  let canvasWidgetGestureResetTap = null;
   let nextObjectChromeStyleId = 1;
+  function normalizedWidgetSource(value) {
+    return typeof value === "string" ? value.replace(/\r\n/g, "\n").trim() : "";
+  }
+  function widgetSourceMirrorsHtml(source, html) {
+    const normalizedSource = normalizedWidgetSource(source);
+    return Boolean(normalizedSource) && normalizedSource === normalizedWidgetSource(html);
+  }
+  function widgetUsesHtmlCopySource(widget) {
+    return Boolean(widget && widget.widgetType !== "diagram_source" && widget.pluginId !== "image-search"
+      && (!widget.copyText || widgetSourceMirrorsHtml(widget.copyText, widget.html)));
+  }
+  function widgetCopySource(widget) {
+    if (!widget || widget.pluginId === "image-search") return "";
+    if (widget.widgetType === "diagram_source") return widget.source || widget.copyText || "";
+    return widgetUsesHtmlCopySource(widget) ? widget.html : widget.copyText || "";
+  }
+  function widgetCopySourceLabel(widget) {
+    if (!widgetCopySource(widget)) return "";
+    if (widgetUsesHtmlCopySource(widget)) return "Copy HTML";
+    return widget.copyLabel || (widget.sourceFormat ? `Copy ${widget.sourceFormat}` : t("copyText"));
+  }
   function tile(tx, ty, create = true) {
     const k = key(tx, ty);
     if (!tiles.has(k) && create) {
@@ -146,6 +178,7 @@
     };
   }
   async function restoreTextBoxes(items) {
+    clearHandToolbarTargets("text-box");
     clearTextEditors();
     state.textBoxes = [];
     state.nextTextBoxId = 1;
@@ -226,6 +259,7 @@
     if (!state.imageHistoryBefore) state.imageHistoryBefore = imageHistoryState();
   }
   function restoreImages(items) {
+    clearHandToolbarTargets("image");
     state.images = [];
     state.nextImageId = 1;
     state.selectedImageId = null;
@@ -260,8 +294,20 @@
     for (const item of visibleImages(region)) bounds = unionLocalBounds(bounds, region ? intersection(imageBox(item), region) : imageBox(item));
     return bounds;
   }
-  function drawImagesToContext(context, region = null) {
-    for (const item of visibleImages(region)) context.drawImage(item.image, item.x, item.y, item.w, item.h);
+  function drawImagesToContext(context, region = null, withShadow = false) {
+    for (const item of visibleImages(region)) {
+      if (!withShadow) {
+        context.drawImage(item.image, item.x, item.y, item.w, item.h);
+        continue;
+      }
+      context.save();
+      context.shadowColor = "rgba(15, 23, 42, .24)";
+      context.shadowBlur = 18;
+      context.shadowOffsetX = 0;
+      context.shadowOffsetY = 7;
+      context.drawImage(item.image, item.x, item.y, item.w, item.h);
+      context.restore();
+    }
   }
   function selectedImage() {
     return state.images.find((item) => item.id === state.selectedImageId) || null;
@@ -283,6 +329,331 @@
       preserveWidgetRefinement:true,
     });
   }
+  function handToolbarKey(kind, id) {
+    return `${kind}:${id}`;
+  }
+  function handToolbarRecord(target = state.handToolbarActiveKey) {
+    if (typeof target === "string") return state.handToolbarTargets.get(target) || null;
+    if (target?.handToolbarKey) return state.handToolbarTargets.get(target.handToolbarKey) || null;
+    if (target?.kind && target?.id) return state.handToolbarTargets.get(handToolbarKey(target.kind, target.id)) || null;
+    return null;
+  }
+  function handToolbarObject(target = state.handToolbarActiveKey) {
+    const record = handToolbarRecord(target) || target;
+    if (!record) return null;
+    if (record.kind === "widget") return state.widgets.find((item) => item.id === record.id) || null;
+    if (record.kind === "image") return state.images.find((item) => item.id === record.id) || null;
+    if (record.kind === "animation") return state.animations.find((item) => item.id === record.id) || null;
+    if (record.kind === "text-box") return state.textBoxes.find((item) => item.id === record.id) || null;
+    return null;
+  }
+  function handToolbarEditMatches(record) {
+    return Boolean(record && (record.kind === "widget" && state.widgetEdit?.id === record.id
+      || record.kind === "image" && state.imageEdit?.id === record.id
+      || record.kind === "animation" && state.animationEdit?.id === record.id));
+  }
+  function finishHandToolbarEdit(record) {
+    if (!handToolbarEditMatches(record)) return false;
+    if (record.kind === "widget") return acceptWidgetEdit();
+    if (record.kind === "image") return acceptImageEdit({ restoreMode:false });
+    return acceptAnimationEdit();
+  }
+  function scheduleHandObjectToolbarTick() {
+    clearTimeout(state.handToolbarTimer);
+    state.handToolbarTimer = 0;
+    let nextAt = Infinity;
+    for (const record of state.handToolbarTargets.values()) {
+      if (record.holds?.size) continue;
+      nextAt = Math.min(nextAt, record.hiding ? record.hideAt : record.expiresAt);
+    }
+    if (!Number.isFinite(nextAt)) return;
+    state.handToolbarTimer = setTimeout(expireHandObjectToolbars, Math.max(0, nextAt - Date.now()));
+  }
+  function finishHandToolbarHide(key) {
+    const record = state.handToolbarTargets.get(key);
+    if (!record) return false;
+    state.handToolbarTargets.delete(key);
+    if (state.handToolbarActiveKey === key) state.handToolbarActiveKey = null;
+    if (state.handHoverKey === key) state.handHoverKey = null;
+    for (const [pointerId, focus] of state.handPointerFocusKeys) if (focus.key === key) state.handPointerFocusKeys.delete(pointerId);
+    for (const [pointerId, operation] of state.handToolbarOperationPointers) if (operation.key === key) state.handToolbarOperationPointers.delete(pointerId);
+    finishHandToolbarEdit(record);
+    requestInteractionLayerRender();
+    return true;
+  }
+  function expireHandObjectToolbars() {
+    state.handToolbarTimer = 0;
+    const now = Date.now();
+    for (const [key, record] of [...state.handToolbarTargets]) {
+      if (!handToolbarObject(record)) {
+        finishHandToolbarHide(key);
+        continue;
+      }
+      if (record.holds?.size) continue;
+      if (record.hiding && record.hideAt <= now) finishHandToolbarHide(key);
+      else if (!record.hiding && record.expiresAt <= now) {
+        record.hiding = true;
+        record.hideAt = now + HAND_OBJECT_TOOLBAR_FADE_MS;
+      }
+    }
+    requestInteractionLayerRender();
+    scheduleHandObjectToolbarTick();
+  }
+  function clearHandToolbarTarget(kind = "", id = "", options = {}) {
+    const key = kind && id ? handToolbarKey(kind, id) : state.handToolbarActiveKey;
+    if (!key || !state.handToolbarTargets.has(key)) return false;
+    if (options.preserveInactive !== false && kind && id && state.handToolbarActiveKey !== key) return false;
+    state.handToolbarTargets.delete(key);
+    if (state.handToolbarActiveKey === key) state.handToolbarActiveKey = null;
+    if (state.handHoverKey === key) state.handHoverKey = null;
+    for (const [pointerId, focus] of state.handPointerFocusKeys) if (focus.key === key) state.handPointerFocusKeys.delete(pointerId);
+    for (const [pointerId, operation] of state.handToolbarOperationPointers) if (operation.key === key) state.handToolbarOperationPointers.delete(pointerId);
+    scheduleHandObjectToolbarTick();
+    return true;
+  }
+  function clearHandToolbarTargets(kind = "") {
+    let changed = false;
+    for (const [key, record] of [...state.handToolbarTargets]) {
+      if (kind && record.kind !== kind) continue;
+      state.handToolbarTargets.delete(key);
+      if (state.handToolbarActiveKey === key) state.handToolbarActiveKey = null;
+      if (state.handHoverKey === key) state.handHoverKey = null;
+      for (const [pointerId, focus] of state.handPointerFocusKeys) if (focus.key === key) state.handPointerFocusKeys.delete(pointerId);
+      for (const [pointerId, operation] of state.handToolbarOperationPointers) if (operation.key === key) state.handToolbarOperationPointers.delete(pointerId);
+      changed = true;
+    }
+    if (changed) scheduleHandObjectToolbarTick();
+    return changed;
+  }
+  function hideHandObjectToolbar({ key = state.handToolbarActiveKey, animate = true, all = false } = {}) {
+    const keys = all ? [...state.handToolbarTargets.keys()] : key ? [key] : [];
+    if (!keys.length) return false;
+    const now = Date.now();
+    for (const targetKey of keys) {
+      const record = state.handToolbarTargets.get(targetKey);
+      if (!record) continue;
+      if (!animate || HAND_OBJECT_TOOLBAR_FADE_MS <= 0) finishHandToolbarHide(targetKey);
+      else if (!record.hiding) {
+        record.hiding = true;
+        record.hideAt = now + HAND_OBJECT_TOOLBAR_FADE_MS;
+      }
+    }
+    requestInteractionLayerRender();
+    scheduleHandObjectToolbarTick();
+    return true;
+  }
+  function refreshHandObjectToolbar(target = state.handToolbarActiveKey) {
+    const record = handToolbarRecord(target);
+    if (!record || !handToolbarObject(record)) return false;
+    record.expiresAt = Date.now() + HAND_OBJECT_TOOLBAR_VISIBLE_MS;
+    record.hiding = false;
+    record.hideAt = 0;
+    scheduleHandObjectToolbarTick();
+    if (record.kind === "animation" && state.handToolbarActiveKey === handToolbarKey(record.kind, record.id)) showAnimationControls(HAND_OBJECT_TOOLBAR_VISIBLE_MS + HAND_OBJECT_TOOLBAR_FADE_MS);
+    requestInteractionLayerRender();
+    return true;
+  }
+  function ensureHandToolbarRecord(kind, object) {
+    if (state.mode !== "hand" || !object?.id || !["widget", "image", "animation", "text-box"].includes(kind)) return null;
+    const key = handToolbarKey(kind, object.id);
+    let record = state.handToolbarTargets.get(key);
+    if (!record) {
+      record = { kind, id:object.id, expanded:false, expiresAt:Date.now() + HAND_OBJECT_TOOLBAR_VISIBLE_MS, hiding:false, hideAt:0, holds:new Set() };
+      state.handToolbarTargets.set(key, record);
+    }
+    return { key, record };
+  }
+  function setHandToolbarHold(key, token, held) {
+    const record = handToolbarRecord(key);
+    if (!record || !token) return false;
+    if (!(record.holds instanceof Set)) record.holds = new Set();
+    if (held) record.holds.add(token);
+    else record.holds.delete(token);
+    record.expiresAt = Date.now() + HAND_OBJECT_TOOLBAR_VISIBLE_MS;
+    record.hiding = false;
+    record.hideAt = 0;
+    scheduleHandObjectToolbarTick();
+    requestInteractionLayerRender();
+    return true;
+  }
+  function focusHandObject(kind, object, token = "") {
+    const ensured = ensureHandToolbarRecord(kind, object);
+    if (!ensured) return "";
+    if (token) ensured.record.holds.add(token);
+    ensured.record.expiresAt = Date.now() + HAND_OBJECT_TOOLBAR_VISIBLE_MS;
+    ensured.record.hiding = false;
+    ensured.record.hideAt = 0;
+    scheduleHandObjectToolbarTick();
+    requestInteractionLayerRender();
+    return ensured.key;
+  }
+  function releaseHandObjectFocus(key, token) {
+    return setHandToolbarHold(key, token, false);
+  }
+  function beginHandToolbarOperation(pointerId, key) {
+    if (!Number.isInteger(pointerId) || !key) return false;
+    const token = `operation:${pointerId}`;
+    state.handToolbarOperationPointers.set(pointerId, { key, token });
+    return setHandToolbarHold(key, token, true);
+  }
+  function finishHandToolbarOperation(pointerId) {
+    const operation = state.handToolbarOperationPointers.get(pointerId);
+    if (!operation) return false;
+    state.handToolbarOperationPointers.delete(pointerId);
+    return releaseHandObjectFocus(operation.key, operation.token);
+  }
+  function activateHandObjectToolbar(target) {
+    const record = handToolbarRecord(target),
+      object = handToolbarObject(record);
+    if (!record || !object) return false;
+    const key = handToolbarKey(record.kind, record.id),
+      previousKey = state.handToolbarActiveKey,
+      previous = previousKey && previousKey !== key ? handToolbarRecord(previousKey) : null;
+    state.handToolbarActiveKey = key;
+    record.expanded = true;
+    if (previous) finishHandToolbarEdit(previous);
+    let activated = true;
+    if (record.kind === "widget") activated = beginWidgetEdit(object);
+    else if (record.kind === "image") activated = beginImageEdit(object);
+    else if (record.kind === "animation") activated = beginAnimationEdit(object);
+    else activated = state.textBoxes.includes(object) && !state.textEditors.size;
+    if (!activated) {
+      record.expanded = false;
+      state.handToolbarActiveKey = null;
+      return false;
+    }
+    if (record.kind === "animation") showAnimationControls(HAND_OBJECT_TOOLBAR_VISIBLE_MS + HAND_OBJECT_TOOLBAR_FADE_MS);
+    refreshHandObjectToolbar(key);
+    return true;
+  }
+  function showHandObjectToolbar(kind, object) {
+    const ensured = ensureHandToolbarRecord(kind, object);
+    if (!ensured) return false;
+    const { key } = ensured;
+    if (!activateHandObjectToolbar(key)) {
+      state.handToolbarTargets.delete(key);
+      scheduleHandObjectToolbarTick();
+      return false;
+    }
+    requestInteractionLayerRender();
+    return true;
+  }
+  function handObjectToolbarTargetAtPoint(point) {
+    if (!point || !valid(point)) return null;
+    const textBox = textBoxAtPoint(point);
+    if (textBox) return { kind:"text-box", object:textBox };
+    const image = imageAtPoint(point);
+    if (image) return { kind:"image", object:image };
+    const widgets = visibleWidgets();
+    for (let index = widgets.length - 1; index >= 0; index--) {
+      const widget = widgets[index], box = widgetBox(widget);
+      if (!widget.pending && point.x >= box.x && point.x <= box.x + box.w && point.y >= box.y && point.y <= box.y + box.h) return { kind:"widget", object:widget };
+    }
+    const animation = animationPointerHit(point)?.animation;
+    if (animation) return { kind:"animation", object:animation };
+    return null;
+  }
+  function updateHandObjectHover(point) {
+    if (state.mode !== "hand") point = null;
+    const target = point && valid(point) ? handObjectToolbarTargetAtPoint(point) : null,
+      nextKey = target ? handToolbarKey(target.kind, target.object.id) : "",
+      previousKey = state.handHoverKey || "";
+    if (previousKey === nextKey) return Boolean(nextKey);
+    if (previousKey) releaseHandObjectFocus(previousKey, "canvas-hover");
+    state.handHoverKey = nextKey;
+    if (target) focusHandObject(target.kind, target.object, "canvas-hover");
+    return Boolean(nextKey);
+  }
+  function beginHandObjectFocus(event, point) {
+    if (state.mode !== "hand" || Number(event.button) !== 0) return false;
+    const target = handObjectToolbarTargetAtPoint(point);
+    if (!target) return false;
+    const token = `pointer:${event.pointerId}`,
+      key = focusHandObject(target.kind, target.object, token);
+    if (!key) return false;
+    state.handPointerFocusKeys.set(event.pointerId, { key, token });
+    return true;
+  }
+  function updateHandObjectFocus(event) {
+    const focus = state.handPointerFocusKeys.get(event.pointerId);
+    if (!focus) return false;
+    refreshHandObjectToolbar(focus.key);
+    return true;
+  }
+  function finishHandObjectFocus(event) {
+    const focus = state.handPointerFocusKeys.get(event.pointerId);
+    if (!focus) return false;
+    state.handPointerFocusKeys.delete(event.pointerId);
+    releaseHandObjectFocus(focus.key, focus.token);
+    return true;
+  }
+  function beginWidgetOwnedHandGesture(id) {
+    state.handWidgetPointerIds.add(id);
+    state.handGestureIncludesWidget = true;
+    state.panGesture = null;
+    state.touchGesture = null;
+    setNavigating(false);
+  }
+  function finishWidgetOwnedHandGesture(id) {
+    state.handWidgetPointerIds.delete(id);
+    if (!state.handWidgetPointerIds.size && !state.touches.size) state.handGestureIncludesWidget = false;
+  }
+  function clearWidgetOwnedHandGestures(widget = null) {
+    const pointerPrefix = widget ? `widget-host:${widget.id}:` : "",
+      belongsToWidget = (id) => !pointerPrefix || String(id).startsWith(pointerPrefix),
+      ids = new Set([...state.handWidgetPointerIds, ...widgetHostPointerAnchors.keys()].filter(belongsToWidget)),
+      ownsDrag = Boolean(widget && state.widgetGesture?.widget === widget),
+      hadWidgetGesture = ownsDrag || ids.size > 0 || !widget && state.handGestureIncludesWidget;
+    if (!hadWidgetGesture) return false;
+    for (const id of ids) {
+      finishHandObjectFocus({ pointerId:id });
+      finishWidgetRefineTouch(id);
+    }
+    if (widget) {
+      for (const id of ids) {
+        state.handWidgetPointerIds.delete(id);
+        widgetHostPointerAnchors.delete(id);
+      }
+      if (ownsDrag) {
+        state.widgetGesture = null;
+        resetCanvasCursor();
+      }
+      state.handGestureIncludesWidget = Boolean(state.handWidgetPointerIds.size || widgetHostPointerAnchors.size);
+    } else {
+      state.handWidgetPointerIds.clear();
+      widgetHostPointerAnchors.clear();
+      state.handGestureIncludesWidget = false;
+    }
+    return true;
+  }
+  function beginCanvasWidgetGestureResetTap(event, point) {
+    canvasWidgetGestureResetTap = null;
+    if (state.mode !== "hand" || !state.handGestureIncludesWidget && !state.handWidgetPointerIds.size && !widgetHostPointerAnchors.size) return false;
+    if (!["mouse", "touch"].includes(event.pointerType) || event.pointerType === "mouse" && Number(event.button) !== 0) return false;
+    if (event.isPrimary === false || state.pointers.size || !point || !valid(point) || handObjectToolbarTargetAtPoint(point)) return false;
+    canvasWidgetGestureResetTap = { id:event.pointerId, startX:event.clientX, startY:event.clientY };
+    return true;
+  }
+  function updateCanvasWidgetGestureResetTap(event) {
+    const tap = canvasWidgetGestureResetTap;
+    if (!tap || tap.id !== event.pointerId) return false;
+    if (state.pointers.size > 1 || Math.hypot(event.clientX - tap.startX, event.clientY - tap.startY) > HAND_WIDGET_GESTURE_RESET_TAP_PX) {
+      canvasWidgetGestureResetTap = null;
+      return false;
+    }
+    return true;
+  }
+  function finishCanvasWidgetGestureResetTap(event) {
+    const tap = canvasWidgetGestureResetTap;
+    if (!tap || tap.id !== event.pointerId) return false;
+    canvasWidgetGestureResetTap = null;
+    if (state.mode !== "hand" || event.type === "pointercancel" || state.pointers.size || state.touches.size
+      || Math.hypot(event.clientX - tap.startX, event.clientY - tap.startY) > HAND_WIDGET_GESTURE_RESET_TAP_PX) return false;
+    return clearWidgetOwnedHandGestures();
+  }
+  function cancelCanvasWidgetGestureResetTap() {
+    canvasWidgetGestureResetTap = null;
+  }
   function beginImageEdit(item) {
     if (!item || !state.images.includes(item)) return false;
     if (state.imageEdit?.id === item.id) return true;
@@ -300,32 +671,44 @@
     options ||= {};
     const restoreMode = options.restoreMode !== false;
     const edit = state.imageEdit;
+    if (edit) clearHandToolbarTarget("image", edit.id);
     state.imageGesture = null;
     state.imageEdit = null;
     state.selectedImageId = null;
+    let refineCandidate = null;
     if (edit?.changed) {
       state.userRevision++;
       save();
     } else if (edit) state.imageHistoryBefore = null;
-    if (edit && state.mode !== "hand") schedule();
+    if (edit && state.dirtyImageIds.has(edit.id)) {
+      recomputeDirtyBounds();
+      refineCandidate = relatchWidgetRefineCandidateFromDirty();
+    }
     requestRender();
     if (edit) setStatusKey("ready");
     if (edit && restoreMode) finishManualImageHandMode();
     else if (edit) state.imageHandReturnMode = null;
+    if (edit && state.mode !== "hand" && !refineCandidate) schedule();
     return Boolean(edit);
   }
   function cancelImageEdit() {
     const edit = state.imageEdit,
       item = edit ? state.images.find((candidate) => candidate.id === edit.id) : null;
+    if (edit) clearHandToolbarTarget("image", edit.id);
     if (item) Object.assign(item, edit.before);
     state.imageHistoryBefore = null;
     state.imageGesture = null;
     state.imageEdit = null;
     state.selectedImageId = null;
-    if (edit && state.mode !== "hand") schedule();
+    let refineCandidate = null;
+    if (edit && state.dirtyImageIds.has(edit.id)) {
+      recomputeDirtyBounds();
+      refineCandidate = relatchWidgetRefineCandidateFromDirty();
+    }
     requestRender();
     if (edit) setStatusKey("ready");
     if (edit) finishManualImageHandMode();
+    if (edit && state.mode !== "hand" && !refineCandidate) schedule();
     return Boolean(edit);
   }
   function imageControlHit(item, point, pointerType = "mouse") {
@@ -407,14 +790,18 @@
     state.imageGesture = null;
     resetCanvasCursor();
     if (gesture.changed && state.imageEdit?.id === gesture.image.id) state.imageEdit.changed = true;
+    refreshHandObjectToolbar();
     requestInteractionLayerRender();
     return true;
   }
   function deleteImage(item) {
     if (!item || !state.images.includes(item)) return false;
     const edited = state.imageEdit?.id === item.id;
+    clearHandToolbarTarget("image", item.id, { preserveInactive:false });
     recordImagesBefore();
     state.images = state.images.filter((candidate) => candidate !== item);
+    state.dirtyImageIds.delete(item.id);
+    recomputeDirtyBounds();
     if (state.selectedImageId === item.id) {
       state.selectedImageId = null;
       state.imageEdit = null;
@@ -430,6 +817,7 @@
   }
   function mergeImage(item) {
     if (!item || !state.images.includes(item)) return false;
+    clearHandToolbarTarget("image", item.id, { preserveInactive:false });
     const edited = state.imageEdit?.id === item.id;
     recordImagesBefore();
     const box = imageBox(item);
@@ -450,20 +838,19 @@
           h: Math.min(TILE, item.y + item.h - ty * TILE) - Math.max(0, item.y - ty * TILE),
         });
       }
+    trackMergedImageAsDirty(item, box);
     state.images = state.images.filter((candidate) => candidate !== item);
+    state.dirtyImageIds.delete(item.id);
     if (state.selectedImageId === item.id) {
       state.selectedImageId = null;
       state.imageEdit = null;
       state.imageGesture = null;
     }
     state.userRevision++;
-    mergeDirty(box.x, box.y, 0);
-    mergeDirty(box.x + box.w, box.y + box.h, 0);
+    recomputeDirtyBounds();
     if (edited) finishManualImageHandMode();
-    if (state.mode !== "hand") {
-      state.autoEligible = true;
-      schedule();
-    }
+    state.autoEligible = true;
+    if (state.mode !== "hand") schedule();
     save();
     requestRender();
     setStatusKey("imageMerged");
@@ -548,6 +935,9 @@
       });
       if (!item) throw imageImportError("imageImportFailed");
       state.images.push(item);
+      state.dirtyImageIds.add(item.id);
+      recomputeDirtyBounds();
+      state.autoEligible = true;
       state.userRevision++;
       save();
       requestRender();
@@ -571,6 +961,13 @@
   function visibleWidgets(region = null) {
     if (!widgetRuntimeEnabled()) return [];
     return state.widgets.filter((widget) => !widget.hiddenForReplacement && pluginEnabled(widget.pluginId) && pluginManifests.has(widget.pluginId) && (!region || intersection(widgetBox(widget), region)));
+  }
+  function capturableWidgets(region = null) {
+    const widgets = visibleWidgets(region),
+      pending = state.pendingWidget;
+    if (!pending || !pending.shell || pending.hiddenForReplacement || !pluginEnabled(pending.pluginId) || !pluginManifests.has(pending.pluginId)
+      || region && !intersection(widgetBox(pending), region) || widgets.includes(pending)) return widgets;
+    return [...widgets, pending];
   }
   function serializedWidgets() {
     return state.widgets.map((widget) => ({
@@ -640,14 +1037,18 @@
       copyText: widgetType === "diagram_source" ? source : allowCopy && typeof item.copyText === "string" ? item.copyText.trim() : "",
       copyLabel: widgetType === "diagram_source" ? runtime?.copyLabel(normalizedSourceFormat) || `Copy ${normalizedSourceFormat}` : allowCopy && typeof item.copyText === "string" ? String(item.copyLabel || (sourceFormat ? `Copy ${sourceFormat}` : "Copy source")).trim() : "",
       snapshotImage: null,
+      contentVersion: 0,
+      snapshotVersion: -1,
       shell: null,
       frame: null,
       hostOrigin: null,
       pending: false,
+      runtimeDiagnostics: null,
     };
   }
   function restoreWidgets(items) {
-    if (state.activeAI?.widgetEdit) supersedeActiveAI("widgets-restored");
+    clearHandToolbarTargets("widget");
+    if (activeWidgetRefinement()) supersedeActiveAI("widgets-restored");
     if (state.pendingWidget) rejectPendingWidget(AI_CANCELLED, { restoreMode:false, status:false });
     state.pendingWidgetReplacement = null;
     clearWidgetRefineCandidate();
@@ -703,25 +1104,29 @@
     frame.title = widget.title;
     frame.referrerPolicy = "no-referrer";
     frame.src = widgetHostUrl(manifest);
+    frame.addEventListener("pointerenter", (event) => {
+      if (state.mode !== "hand" || event.pointerType === "touch") return;
+      updateHandObjectHover(clientPoint(event));
+    });
+    frame.addEventListener("pointerleave", () => updateHandObjectHover(null));
+    frame.addEventListener("focus", () => focusHandObject("widget", widget, "widget-focus"));
+    frame.addEventListener("blur", () => releaseHandObjectFocus(handToolbarKey("widget", widget.id), "widget-focus"));
     shell.append(frame);
     widgetLayer.append(shell);
     widget.shell = shell;
     widget.frame = frame;
     widget.hostOrigin = new URL(frame.src).origin;
+    widget.runtimeDiagnostics = null;
     widget.initialized = false;
     widget.hostReady = false;
     widget.hostReadyPromise = new Promise((resolve) => (widget.resolveHostReady = resolve));
     widget.hostStateKey = null;
-    widget.contentReady = false;
-    widget.readyPromise = new Promise((resolve) => (widget.resolveReady = resolve));
     addWidgetStyleRule(widget);
     positionWidget(widget);
   }
   function unmountWidget(widget) {
-    if (state.widgetHostPan?.widget === widget) {
-      state.widgetHostPan = null;
-      setNavigating(false);
-    }
+    clearWidgetOwnedHandGestures(widget);
+    clearHandToolbarTarget("widget", widget.id, { preserveInactive:false });
     removeWidgetStyleRule(widget);
     widget.shell?.remove();
     widget.shell = null;
@@ -731,9 +1136,6 @@
     widget.hostReady = false;
     widget.resolveHostReady = null;
     widget.hostReadyPromise = null;
-    widget.contentReady = false;
-    widget.resolveReady = null;
-    widget.readyPromise = null;
     for (const [requestId, pending] of widgetSnapshotRequests) {
       if (pending.widget !== widget) continue;
       clearTimeout(pending.timer);
@@ -813,10 +1215,10 @@
     if (!widget.frame?.contentWindow || !widget.hostReady || !Number.isFinite(scaleX) || scaleX <= 0 || !Number.isFinite(scaleY) || scaleY <= 0) return;
     const selected = widget.pending === true || (state.widgetEdit?.id === widget.id && state.selectedWidgetId === widget.id),
       active = widget.renderActive !== false,
-      key = `${selected ? 1 : 0}:${active ? 1 : 0}:${scaleX.toFixed(6)}:${scaleY.toFixed(6)}`;
+      key = `${selected ? 1 : 0}:${active ? 1 : 0}:${state.navigationLocked ? 1 : 0}:${scaleX.toFixed(6)}:${scaleY.toFixed(6)}`;
     if (!force && widget.hostStateKey === key) return;
     widget.hostStateKey = key;
-    widget.frame.contentWindow.postMessage({ type:"penecho-widget-state", selected, active, scaleX, scaleY }, widget.hostOrigin || location.origin);
+    widget.frame.contentWindow.postMessage({ type:"penecho-widget-state", selected, active, navigationLocked:state.navigationLocked, scaleX, scaleY }, widget.hostOrigin || location.origin);
   }
   function syncWidgetHostStates() {
     for (const widget of [...state.widgets, ...(state.pendingWidget ? [state.pendingWidget] : [])]) sendWidgetHostState(widget);
@@ -829,43 +1231,45 @@
       image.src = dataUrl;
     });
   }
-  async function waitForWidgetContent(widget, timeoutMs = WIDGET_SNAPSHOT_TIMEOUT_MS) {
-    if (widget.contentReady) return;
-    if (!widget.readyPromise) throw Error(t("widgetExportFailed"));
-    await Promise.race([
-      widget.readyPromise,
-      new Promise((_, reject) => setTimeout(() => reject(Error(t("widgetExportFailed"))), timeoutMs)),
-    ]);
-  }
-  async function requestWidgetSnapshot(widget, timeoutMs = WIDGET_SNAPSHOT_TIMEOUT_MS) {
-    if (widget.snapshotPromise) return widget.snapshotPromise;
+  async function requestWidgetSnapshot(widget, timeoutMs = WIDGET_SNAPSHOT_TIMEOUT_MS, requireFresh = true) {
+    if (widget.snapshotPromise) {
+      const inFlight = widget.snapshotPromise;
+      if (!requireFresh) return inFlight;
+      try { await inFlight; } catch {}
+      if (widget.snapshotImage && widget.snapshotVersion >= widget.contentVersion) return widget.snapshotImage;
+    }
     timeoutMs = Math.max(1000, Math.min(WIDGET_SNAPSHOT_TIMEOUT_MS, Number(timeoutMs) || WIDGET_SNAPSHOT_TIMEOUT_MS));
     const snapshotPromise = (async () => {
-      const previousActive = widget.renderActive;
+      const previousActive = widget.renderActive,
+        deadline = performance.now() + timeoutMs,
+        remaining = () => Math.max(1, deadline - performance.now());
       try {
-        if (!widget.hostReady && widget.hostReadyPromise) await Promise.race([
-          widget.hostReadyPromise,
-          new Promise((_, reject) => setTimeout(() => reject(Error(t("widgetExportFailed"))), timeoutMs)),
-        ]);
-        if (!widget.initialized) {
-          widget.renderActive = true;
-          sendWidgetInit(widget);
-          sendWidgetHostState(widget, undefined, undefined, true);
-        }
-        await waitForWidgetContent(widget, timeoutMs);
         if (!widget.frame?.contentWindow) throw Error(t("widgetExportFailed"));
+        if (!widget.hostReady) {
+          if (!widget.hostReadyPromise) throw Error(t("widgetExportFailed"));
+          await Promise.race([
+            widget.hostReadyPromise,
+            new Promise((_, reject) => setTimeout(() => reject(Error(t("widgetExportFailed"))), remaining())),
+          ]);
+        }
+        widget.renderActive = true;
+        widget.shell?.classList.remove("widget-offscreen");
+        if (!widget.initialized) sendWidgetInit(widget);
+        if (!widget.hostReady || !widget.initialized) throw Error(t("widgetExportFailed"));
+        sendWidgetHostState(widget, undefined, undefined, true);
         const requestId = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
         return await new Promise((resolve, reject) => {
           const timer = setTimeout(() => {
             widgetSnapshotRequests.delete(requestId);
             reject(Error(t("widgetExportFailed")));
-          }, timeoutMs);
-          widgetSnapshotRequests.set(requestId, { widget, resolve, reject, timer });
-          widget.frame.contentWindow.postMessage({ type:"penecho-widget-snapshot-request", requestId, width:widget.contentW, height:widget.contentH, timeoutMs }, widget.hostOrigin || location.origin);
+          }, remaining());
+          widgetSnapshotRequests.set(requestId, { widget, resolve, reject, timer, contentVersion:widget.contentVersion });
+          widget.frame.contentWindow.postMessage({ type:"penecho-widget-snapshot-request", requestId, width:widget.contentW, height:widget.contentH, timeoutMs:remaining() }, widget.hostOrigin || location.origin);
         });
       } finally {
         if (previousActive === false) {
           widget.renderActive = false;
+          widget.shell?.classList.add("widget-offscreen");
           sendWidgetHostState(widget, undefined, undefined, true);
         }
       }
@@ -889,15 +1293,19 @@
       sendWidgetHostState(widget, undefined, undefined, true);
       return;
     }
-    if (message.type === "penecho-widget-activate") {
-      if (state.mode === "hand" && !widget.pending && state.widgets.includes(widget)) beginWidgetEdit(widget);
+    if (message.type === "penecho-widget-capture-ready") {
+      return;
+    }
+    if (validWidgetHostActivate(message)) {
+      if (state.mode === "hand") {
+        const target = handObjectToolbarTargetFromWidgetMessage(widget, message);
+        if (target) focusHandObject(target.kind, target.object);
+      }
       return;
     }
     if (validWidgetHostDrag(message)) {
       if (message.type === "penecho-widget-drag-start") beginWidgetHostDrag(widget, message);
-      else if (message.type === "penecho-widget-drag-move") {
-        if (!updateWidgetHostDrag(widget, message) && message.pointerType === "touch") updateWidgetHostTouch(widget, { ...message, type:"penecho-widget-touch-move" });
-      }
+      else if (message.type === "penecho-widget-drag-move") updateWidgetHostDrag(widget, message);
       else finishWidgetHostDrag(widget, message);
       return;
     }
@@ -907,14 +1315,15 @@
       else finishWidgetHostTouch(widget, message);
       return;
     }
-    if (validWidgetHostNavigation(message)) {
-      handleWidgetHostNavigation(widget, message);
+    if (validWidgetRuntimeDiagnostics(message)) {
+      widget.runtimeDiagnostics = {
+        errors:message.errors.map(error => ({ ...error, stack:[...error.stack] })),
+        truncated:message.truncated,
+      };
       return;
     }
     if (message.type === "penecho-widget-updated") {
-      widget.contentReady = true;
-      widget.resolveReady?.();
-      widget.resolveReady = null;
+      widget.contentVersion++;
       return;
     }
     if (!["penecho-widget-snapshot", "penecho-widget-snapshot-error"].includes(message.type)) return;
@@ -922,13 +1331,15 @@
     if (!pending || pending.widget !== widget) return;
     widgetSnapshotRequests.delete(message.requestId);
     clearTimeout(pending.timer);
-    if (message.type === "penecho-widget-snapshot-error" || typeof message.dataUrl !== "string" || !message.dataUrl.startsWith("data:image/png;base64,")) {
+    if (message.type === "penecho-widget-snapshot-error" || typeof message.dataUrl !== "string" || !message.dataUrl.startsWith("data:image/png;base64,")
+      || !Number.isFinite(message.width) || message.width <= 0 || !Number.isFinite(message.height) || message.height <= 0) {
       if (message.type === "penecho-widget-snapshot-error") console.warn("PenEcho widget snapshot failed:", String(message.error || "unknown error").slice(0, 300));
       pending.reject(Error(t("widgetExportFailed")));
       return;
     }
     try {
       widget.snapshotImage = await decodeWidgetSnapshot(message.dataUrl);
+      widget.snapshotVersion = pending.contentVersion;
       pending.resolve(widget.snapshotImage);
     } catch (error) {
       pending.reject(error);
@@ -951,6 +1362,7 @@
   }
   function acceptWidgetEdit() {
     const edit = state.widgetEdit;
+    if (edit) clearHandToolbarTarget("widget", edit.id);
     state.widgetGesture = null;
     state.widgetEdit = null;
     state.selectedWidgetId = null;
@@ -966,6 +1378,7 @@
   function cancelWidgetEdit() {
     const edit = state.widgetEdit,
       widget = edit ? state.widgets.find((item) => item.id === edit.id) : null;
+    if (edit) clearHandToolbarTarget("widget", edit.id);
     if (widget) {
       Object.assign(widget, edit.before);
       positionWidget(widget);
@@ -1077,6 +1490,17 @@
     if (!gesture || gesture.id !== event.pointerId) return false;
     return updateWidgetGesturePoint(gesture, clientPoint(event));
   }
+  function finishReleasedWidgetGesture(event) {
+    const gesture = state.widgetGesture;
+    if (!gesture || event.pointerType !== "mouse" || Number(event.buttons) !== 0) return false;
+    if (gesture.source !== "widget-host" && gesture.id !== event.pointerId) return false;
+    return finishWidgetGesture({ pointerId:gesture.id });
+  }
+  function finishStaleWidgetHostGesture(event) {
+    const gesture = state.widgetGesture;
+    if (!gesture || gesture.source !== "widget-host" || event.pointerType !== "mouse" || Number(event.button) !== 0) return false;
+    return finishWidgetGesture({ pointerId:gesture.id });
+  }
   function validWidgetHostDrag(message) {
     return message && ["penecho-widget-drag-start", "penecho-widget-drag-move", "penecho-widget-drag-end"].includes(message.type)
       && Number.isInteger(message.pointerId) && Math.abs(message.pointerId) <= 0x7fffffff
@@ -1090,12 +1514,25 @@
       && message.pointerType === "touch"
       && [message.localX, message.localY, message.screenX, message.screenY].every(value => Number.isFinite(value) && Math.abs(value) <= 10000000);
   }
-  function validWidgetHostNavigation(message) {
-    if (!message || !["penecho-widget-pan-start", "penecho-widget-pan-move", "penecho-widget-pan-end", "penecho-widget-wheel"].includes(message.type)) return false;
-    if (message.type === "penecho-widget-wheel")
-      return [message.localX, message.localY, message.deltaY].every((value) => Number.isFinite(value) && Math.abs(value) <= 10000000);
-    return Number.isInteger(message.pointerId) && Math.abs(message.pointerId) <= 0x7fffffff && message.pointerType === "mouse"
-      && [message.localX, message.localY, message.screenX, message.screenY].every((value) => Number.isFinite(value) && Math.abs(value) <= 10000000);
+  function validWidgetHostActivate(message) {
+    return message?.type === "penecho-widget-activate"
+      && Number.isInteger(message.pointerId) && Math.abs(message.pointerId) <= 0x7fffffff
+      && ["mouse", "pen", "touch"].includes(message.pointerType)
+      && [message.localX, message.localY, message.screenX, message.screenY].every(value => Number.isFinite(value) && Math.abs(value) <= 10000000);
+  }
+  function validWidgetRuntimeDiagnostics(message) {
+    return message && message.type === "penecho-widget-runtime-diagnostics"
+      && typeof message.truncated === "boolean" && Array.isArray(message.errors) && message.errors.length <= 5
+      && message.errors.every(error => error && typeof error === "object"
+        && ["error", "unhandledrejection", "script-load"].includes(error.kind)
+        && typeof error.name === "string" && error.name.length > 0 && error.name.length <= 80
+        && typeof error.message === "string" && error.message.length > 0 && error.message.length <= 400
+        && typeof error.file === "string" && error.file.length > 0 && error.file.length <= 300
+        && Number.isInteger(error.line) && error.line >= 0 && error.line <= 10000000
+        && Number.isInteger(error.column) && error.column >= 0 && error.column <= 10000000
+        && Number.isInteger(error.repeatedCount) && error.repeatedCount >= 1 && error.repeatedCount <= 1000000
+        && Array.isArray(error.stack) && error.stack.length <= 3
+        && error.stack.every(frame => typeof frame === "string" && frame.length > 0 && frame.length <= 300));
   }
   function widgetHostPointerId(widget, pointerId) {
     return `widget-host:${widget.id}:${pointerId}`;
@@ -1107,6 +1544,11 @@
       x:rect.left + message.localX * rect.width / widget.contentW,
       y:rect.top + message.localY * rect.height / widget.contentH,
     };
+  }
+  function handObjectToolbarTargetFromWidgetMessage(widget, message) {
+    const viewportPoint = widgetHostViewportPoint(widget, message);
+    if (!viewportPoint) return { kind:"widget", object:widget };
+    return handObjectToolbarTargetAtPoint(clientPoint({ clientX:viewportPoint.x, clientY:viewportPoint.y })) || { kind:"widget", object:widget };
   }
   function widgetHostTrackedPoint(anchor, message) {
     if (!anchor) return null;
@@ -1129,111 +1571,41 @@
     if (!Number.isFinite(candidate) || candidate <= 0.25 || candidate >= 4) return;
     screenClientRatio = Math.min(4, Math.max(0.25, screenClientRatio * 0.7 + candidate * 0.3));
   }
-  function releaseWidgetHostTouch(widget, pointerId) {
-    const id = widgetHostPointerId(widget, pointerId);
-    widgetHostPointerAnchors.delete(id);
-    state.pointers.delete(id);
-    state.touches.delete(id);
-    if (state.panGesture?.id === id) state.panGesture = null;
-    if (state.touchGesture?.ids?.includes(id)) state.touchGesture = null;
-    if (!state.touches.size) setNavigating(false);
-  }
   function beginWidgetHostTouch(widget, message) {
-    if (!validWidgetHostTouch(message) || message.type !== "penecho-widget-touch-start") return false;
+    if (state.mode !== "hand" || !validWidgetHostTouch(message) || message.type !== "penecho-widget-touch-start") return false;
     const point = widgetHostViewportPoint(widget, message);
     if (!point) return false;
     const id = widgetHostPointerId(widget, message.pointerId);
-    state.pointers.set(id, point);
-    state.touches.set(id, point);
     widgetHostPointerAnchors.set(id, { clientX:point.x, clientY:point.y, screenX:message.screenX, screenY:message.screenY });
-    if (state.touches.size < 2) return true;
-    state.textTap = null;
-    if (state.pendingGesture) state.pendingGesture = null;
-    if (state.widgetGesture) finishWidgetGesture({ pointerId:state.widgetGesture.id });
-    if (state.selectedWidgetId) acceptWidgetEdit();
-    if (state.animationGesture) finishAnimationGesture({ pointerId:state.animationGesture.id });
-    if (state.selectedAnimationId) acceptAnimationEdit();
-    finishDrawing("pen");
-    beginTouchGesture();
+    beginWidgetOwnedHandGesture(id);
+    const token = `pointer:${id}`,
+      target = handObjectToolbarTargetFromWidgetMessage(widget, message),
+      key = focusHandObject(target.kind, target.object, token);
+    if (key) state.handPointerFocusKeys.set(id, { key, token });
     return true;
   }
   function updateWidgetHostTouch(widget, message) {
-    if (!validWidgetHostTouch(message) || message.type !== "penecho-widget-touch-move") return false;
+    if (state.mode !== "hand" || !validWidgetHostTouch(message) || message.type !== "penecho-widget-touch-move") return false;
     const id = widgetHostPointerId(widget, message.pointerId),
-      old = state.pointers.get(id),
       point = widgetHostTrackedPoint(widgetHostPointerAnchors.get(id), message) || widgetHostViewportPoint(widget, message);
-    if (!old || !point || !state.touches.has(id)) return false;
-    state.pointers.set(id, point);
-    state.touches.set(id, point);
-    if (state.touches.size >= 2) {
-      if (!state.touchGesture) beginTouchGesture();
-      return updateTouchGesture();
-    }
-    if (!state.panGesture || state.panGesture.id !== id) state.panGesture = { id, last:old };
-    moveCanvas(point.x - old.x, point.y - old.y);
-    state.panGesture.last = point;
-    setNavigating(true);
-    return true;
+    if (!point || !state.handWidgetPointerIds.has(id)) return false;
+    return updateHandObjectFocus({ pointerId:id });
   }
   function finishWidgetHostTouch(widget, message) {
     if (!validWidgetHostTouch(message) || message.type !== "penecho-widget-touch-end") return false;
     const id = widgetHostPointerId(widget, message.pointerId);
-    if (!state.pointers.has(id) && !state.touches.has(id)) return false;
-    state.pointers.delete(id);
-    state.touches.delete(id);
+    if (!state.handWidgetPointerIds.has(id)) return false;
+    finishHandObjectFocus({ pointerId:id });
+    finishWidgetOwnedHandGesture(id);
     widgetHostPointerAnchors.delete(id);
-    state.touchGesture = null;
-    if (state.touches.size === 1) {
-      const [remainingId, point] = state.touches.entries().next().value;
-      state.panGesture = { id:remainingId, last:point };
-    } else state.panGesture = null;
-    if (!state.touches.size) setNavigating(false);
-    return true;
-  }
-  function handleWidgetHostNavigation(widget, message) {
-    if (!validWidgetHostNavigation(message)) return false;
-    if (message.type === "penecho-widget-wheel") {
-      const point = widgetHostViewportPoint(widget, message);
-      if (!point) return false;
-      zoomCanvasAt(point.x, point.y, message.deltaY);
-      return true;
-    }
-    const id = widgetHostPointerId(widget, message.pointerId);
-    if (message.type === "penecho-widget-pan-start") {
-      const point = widgetHostViewportPoint(widget, message);
-      if (!point || state.widgetHostPan) return false;
-      if (state.selectedImageId) acceptImageEdit({ restoreMode:false });
-      if (state.selectedWidgetId) acceptWidgetEdit();
-      if (state.selectedAnimationId) acceptAnimationEdit();
-      state.widgetHostPan = {
-        id,
-        widget,
-        last:point,
-        anchor:{ clientX:point.x, clientY:point.y, screenX:message.screenX, screenY:message.screenY },
-      };
-      setNavigating(true);
-      return true;
-    }
-    const pan = state.widgetHostPan;
-    if (!pan || pan.id !== id || pan.widget !== widget) return false;
-    if (message.type === "penecho-widget-pan-move") {
-      const point = widgetHostTrackedPoint(pan.anchor, message) || widgetHostViewportPoint(widget, message);
-      if (!point) return false;
-      moveCanvas(point.x - pan.last.x, point.y - pan.last.y);
-      pan.last = point;
-      setNavigating(true);
-      return true;
-    }
-    state.widgetHostPan = null;
-    setNavigating(false);
+    finishWidgetRefineTouch(id);
     return true;
   }
   function beginWidgetHostDrag(widget, message) {
     if (!validWidgetHostDrag(message) || message.type !== "penecho-widget-drag-start") return false;
     if (message.pointerType === "touch") {
       const id = widgetHostPointerId(widget, message.pointerId);
-      if ([...state.touches.keys()].some((pointerId) => pointerId !== id)) return false;
-      releaseWidgetHostTouch(widget, message.pointerId);
+      if ([...state.handWidgetPointerIds].some((pointerId) => pointerId !== id)) return false;
     }
     if (state.widgetGesture || state.pendingGesture || state.animationGesture || state.selectionGesture || state.drawing || state.panGesture || state.touchGesture) return false;
     const pending = widget === state.pendingWidget && widget.pending === true;
@@ -1276,11 +1648,13 @@
     resetCanvasCursor();
     if (gesture.changed && !gesture.pending && state.widgetEdit?.id === gesture.widget.id) state.widgetEdit.changed = true;
     positionWidget(gesture.widget);
+    if (!gesture.pending) refreshHandObjectToolbar();
     requestInteractionLayerRender();
     return true;
   }
   function deleteWidget(widget) {
     if (!widget || widget.pending || !state.widgets.includes(widget)) return false;
+    clearHandToolbarTarget("widget", widget.id, { preserveInactive:false });
     recordWidgetsBefore();
     unmountWidget(widget);
     state.widgets = state.widgets.filter((item) => item !== widget);
@@ -1313,8 +1687,8 @@
     widget.pending = false;
     const resolve = widget.resolve;
     widget.resolve = null;
-    unmountWidget(widget);
     if (replacement) {
+      unmountWidget(widget);
       const index = state.widgets.indexOf(replacement.target);
       if (index < 0 || replacement.target.id !== widget.id || replacement.target.pluginId !== widget.pluginId) {
         replacement.target.hiddenForReplacement = false;
@@ -1325,14 +1699,23 @@
         return;
       }
       state.widgets.splice(index, 1, widget);
-    } else state.widgets.push(widget);
-    mountWidget(widget);
+      mountWidget(widget);
+    } else {
+      state.widgets.push(widget);
+      if (widget.shell) {
+        widget.shell.classList.remove("pending");
+        widget.shell.tabIndex = 0;
+        widget.hostStateKey = null;
+        sendWidgetHostState(widget, undefined, undefined, true);
+      } else mountWidget(widget);
+    }
     const historyEntry = save();
     if (!replacement) recordPendingHistory(historyEntry, pendingBefore, capturePendingHistoryState());
     requestInteractionLayerRender();
     setStatusKey("merged");
     resolve?.(true);
     if (restoreMode) finishAIDraftHandMode();
+    if (!replacement && restoreMode) showCanvasHint("canvasHintWidgetTouchHand");
   }
   function rejectPendingWidget(result = AI_REJECTED, options) {
     options ||= {};
@@ -1357,7 +1740,7 @@
   }
   function cancelWidgetRefinement(reason = "widget-refine-cancelled", options) {
     let cancelled = false;
-    if (state.activeAI?.widgetEdit) {
+    if (activeWidgetRefinement()) {
       supersedeActiveAI(reason);
       cancelled = true;
     }
@@ -1378,7 +1761,8 @@
     enterAIDraftHandMode();
     mountWidget(widget);
     requestInteractionLayerRender();
-    setStatusKey("draftReady");
+    if (widget.widgetType === "html_widget") showCanvasHint(["canvasHintWidgetAdded", "canvasHintWidgetAddedAlt", "canvasHintRefineInPlace", "canvasHintAIAddsOnly"]);
+    setStatusKey("aiDone");
     return new Promise((resolve) => (widget.resolve = resolve));
   }
   function startPendingWidgetReplacement(command, target, revision) {
@@ -1400,31 +1784,44 @@
     unmountWidget(target);
     state.pendingWidget = widget;
     state.pendingWidgetReplacement = { target, targetId:target.id, pluginId:target.pluginId, revision };
-    enterAIDraftHandMode();
-    mountWidget(widget);
-    requestInteractionLayerRender();
-    setStatusKey("widgetReplacementReady");
-    return new Promise((resolve) => (widget.resolve = resolve));
+    acceptPendingWidget({ restoreMode:false });
+    return Promise.resolve(state.widgets.includes(widget));
   }
   function widgetBounds(region = null) {
     let bounds = null;
-    for (const widget of visibleWidgets(region)) bounds = unionLocalBounds(bounds, region ? intersection(widgetBox(widget), region) : widgetBox(widget));
+    for (const widget of capturableWidgets(region)) bounds = unionLocalBounds(bounds, region ? intersection(widgetBox(widget), region) : widgetBox(widget));
     return bounds;
   }
   function drawWidgetsToContext(context, region = null) {
-    for (const widget of visibleWidgets(region)) {
+    for (const widget of capturableWidgets(region)) {
       if (!widget.snapshotImage) continue;
       context.drawImage(widget.snapshotImage, widget.x, widget.y, widget.w, widget.h);
     }
   }
-  async function snapshotVisibleWidgets({ bestEffort = false } = {}) {
-    const timeoutMs = bestEffort ? WIDGET_HISTORY_SNAPSHOT_WAIT_MS : WIDGET_SNAPSHOT_TIMEOUT_MS,
-      requests = visibleWidgets().map((widget) => requestWidgetSnapshot(widget, timeoutMs));
-    if (!bestEffort) return void await Promise.all(requests);
-    await Promise.all(requests.map((request) => Promise.race([
-      request.catch(() => null),
-      new Promise((resolve) => setTimeout(resolve, WIDGET_HISTORY_SNAPSHOT_WAIT_MS)),
-    ])));
+  async function prepareVisibleWidgetSnapshots(region = null, bestEffort = true) {
+    let widgets = [];
+    try {
+      widgets = capturableWidgets(region);
+      const captured = await Promise.all(widgets.map(async (widget) => {
+        try {
+          const request = requestWidgetSnapshot(widget, WIDGET_SNAPSHOT_TIMEOUT_MS, true);
+          if (bestEffort) await Promise.race([
+            request,
+            new Promise((_, reject) => setTimeout(() => reject(Error("snapshot-wait-expired")), WIDGET_HISTORY_SNAPSHOT_WAIT_MS)),
+          ]);
+          else await request;
+        } catch (error) {
+          debug("widget-snapshot-degraded", { widgetId:widget.id, error:String(error?.message || error).slice(0, 300) });
+        }
+        return Boolean(widget.snapshotImage);
+      })),
+        capturedCount = captured.filter(Boolean).length;
+      return { total:widgets.length, captured:capturedCount, missing:widgets.length - capturedCount };
+    } catch (error) {
+      debug("widget-snapshot-preparation-failed", { error:String(error?.message || error).slice(0, 300) });
+      const captured = widgets.filter((widget) => widget.snapshotImage).length;
+      return { total:widgets.length, captured, missing:widgets.length - captured };
+    }
   }
 
   function animationBox(animation) {
@@ -1484,6 +1881,7 @@
     }));
   }
   function restoreAnimations(items) {
+    clearHandToolbarTargets("animation");
     state.animations = [];
     state.selectedAnimationId = null;
     state.animationEdit = null;
@@ -1519,6 +1917,7 @@
   }
   function acceptAnimationEdit() {
     const edit = state.animationEdit;
+    if (edit) clearHandToolbarTarget("animation", edit.id);
     state.animationGesture = null;
     state.animationEdit = null;
     state.selectedAnimationId = null;
@@ -1535,6 +1934,7 @@
   function cancelAnimationEdit() {
     const edit = state.animationEdit,
       animation = edit ? state.animations.find((item) => item.id === edit.id) : null;
+    if (edit) clearHandToolbarTarget("animation", edit.id);
     if (animation) {
       Object.assign(animation, edit.before, { startedAt: performance.now() });
     }
@@ -1581,6 +1981,7 @@
     }
     const animation = selectedAnimation();
     if (!animation) return;
+    clearHandToolbarTarget("animation", animation.id, { preserveInactive:false });
     recordAnimationsBefore();
     state.animations = state.animations.filter((item) => item !== animation);
     state.selectedAnimationId = null;
@@ -1676,9 +2077,12 @@
   function positionAnimationControls() {
     const target = animationControlTarget();
     if (!pluginEnabled("animation") || !target) {
+      animationControls.classList.remove("hand-toolbar-hiding");
       if (!animationControls.hidden) animationControls.hidden = true;
       return;
     }
+    const handRecord = target.kind === "confirmed" ? handToolbarRecord({ kind:"animation", id:target.animation.id }) : null;
+    animationControls.classList.toggle("hand-toolbar-hiding", Boolean(handRecord?.hiding));
     if (performance.now() >= state.animationControlsUntil) {
       if (!animationControls.hidden) animationControls.hidden = true;
       if (target.kind === "confirmed") acceptAnimationEdit();
@@ -1859,6 +2263,8 @@
     screen.height = Math.round(r.height * d);
     animationLayer.width = screen.width;
     animationLayer.height = screen.height;
+    placedContentLayer.width = screen.width;
+    placedContentLayer.height = screen.height;
     inkLayer.width = screen.width;
     inkLayer.height = screen.height;
     interactionLayer.width = screen.width;
@@ -1872,6 +2278,28 @@
     }
     updateCoordinates();
     requestRender();
+  }
+  function renderPlacedContentLayer(region = null) {
+    const d = devicePixelRatio || 1,
+      r = view.getBoundingClientRect(),
+      visible = region || {
+        x:Math.max(0, -state.panX / state.scale),
+        y:Math.max(0, -state.panY / state.scale),
+        w:Math.min(SIZE, (r.width - state.panX) / state.scale) - Math.max(0, -state.panX / state.scale),
+        h:Math.min(SIZE, (r.height - state.panY) / state.scale) - Math.max(0, -state.panY / state.scale),
+      };
+    placedContentCtx.setTransform(d, 0, 0, d, 0, 0);
+    placedContentCtx.clearRect(0, 0, r.width, r.height);
+    if (visible.w <= 0 || visible.h <= 0) return;
+    placedContentCtx.save();
+    placedContentCtx.translate(state.panX, state.panY);
+    placedContentCtx.scale(state.scale, state.scale);
+    placedContentCtx.beginPath();
+    placedContentCtx.rect(0, 0, SIZE, SIZE);
+    placedContentCtx.clip();
+    drawImagesToContext(placedContentCtx, visible, state.widgetShadowEnabled);
+    drawTextBoxesToContext(placedContentCtx, visible);
+    placedContentCtx.restore();
   }
   function renderInkLayer(region = null) {
     const d = devicePixelRatio || 1,
@@ -1935,13 +2363,12 @@
       }
       ctx.stroke();
     }
-    drawImagesToContext(ctx, { x:l, y:t, w:rr - l, h:b - t });
-    drawTextBoxesToContext(ctx, { x:l, y:t, w:rr - l, h:b - t });
     ctx.restore();
     ctx.strokeStyle = state.paint.border;
     ctx.lineWidth = 2 / state.scale;
     ctx.strokeRect(0, 0, SIZE, SIZE);
     ctx.restore();
+    renderPlacedContentLayer({ x:l, y:t, w:rr - l, h:b - t });
     renderInkLayer({ x:l, y:t, w:rr - l, h:b - t });
     renderInteractionLayer();
     positionWidgets();
@@ -1957,9 +2384,6 @@
     context.save();
     context.strokeStyle = "#2679b8";
     context.lineWidth = 2 * unit;
-    context.setLineDash([7 * unit, 6 * unit]);
-    context.strokeRect(box.x, box.y, box.w, box.h);
-    context.setLineDash([]);
     context.beginPath();
     drawResizeHandle(context, box, handle);
     context.moveTo(box.x + box.w + handle * 0.08, box.y + box.h / 2 - handle * 0.48);
@@ -1969,22 +2393,154 @@
     context.stroke();
     context.restore();
   }
-  function drawHandModeOutlines(context) {
-    if (state.mode !== "hand") return;
-    const unit = 1 / state.scale,
-      boxes = [
-        ...visibleImages().map(imageBox),
-        ...visibleAnimations().map(animationBox),
-        ...visibleTextBoxes().map(textBoxBox),
-        ...visibleWidgets().map(widgetBox),
-      ];
-    if (!boxes.length) return;
+  function drawHandObjectToolbarOutlines(context) {
+    if (state.mode !== "hand" || !state.handToolbarTargets.size) return;
+    const unit = 1 / state.scale;
     context.save();
-    context.globalAlpha = 0.42;
-    context.strokeStyle = "#2679b8";
+    context.strokeStyle = "rgba(38, 121, 184, 0.42)";
     context.lineWidth = unit;
-    context.setLineDash([4 * unit, 5 * unit]);
-    for (const box of boxes) context.strokeRect(box.x, box.y, box.w, box.h);
+    for (const record of state.handToolbarTargets.values()) {
+      if (!record.expanded) continue;
+      const object = handToolbarObject(record),
+        box = object && (record.kind === "widget" ? widgetBox(object)
+          : record.kind === "image" ? imageBox(object)
+          : record.kind === "animation" ? animationBox(object)
+          : record.kind === "text-box" ? textBoxBox(object)
+          : null);
+      if (!box) continue;
+      context.globalAlpha = record.hiding ? .28 : 1;
+      context.strokeRect(box.x, box.y, box.w, box.h);
+    }
+    context.restore();
+  }
+  function widgetRefineOutlineTarget(widgetId) {
+    const widget = visibleWidgets().find((item) => item.id === widgetId);
+    return widget?.shell && !widget.pending && widget.renderActive !== false ? widget : null;
+  }
+  function strokeWidgetRefineOutline(context, widget, opacity = 1, muted = false, solid = false) {
+    const box = widgetBox(widget),
+      unit = 1 / state.scale;
+    context.save();
+    context.globalAlpha *= opacity;
+    if (muted) context.strokeStyle = solid ? "#6b7280" : "rgba(107, 114, 128, 0.38)";
+    else {
+      context.strokeStyle = solid ? "#007aff" : "rgba(0, 122, 255, 0.34)";
+    }
+    context.lineWidth = (solid ? 2 : 1) * unit;
+    context.setLineDash(solid ? [] : [4 * unit, 4 * unit]);
+    context.lineCap = context.lineJoin = "round";
+    context.strokeRect(box.x, box.y, box.w, box.h);
+    context.restore();
+  }
+  function widgetRefineCandidateForId(widgetId) {
+    const confirmation = state.widgetRefineConfirmation;
+    if (confirmation?.widgetId === widgetId) return confirmation.candidate;
+    return [state.widgetRefineCandidate, state.widgetRefineHoverCandidate].find(candidate => candidate?.widgetId === widgetId) || null;
+  }
+  function drawWidgetRefineButtonHoverOutline(context) {
+    const widgetId = state.widgetRefineButtonHoverId;
+    if (!["pen", "hand"].includes(state.mode) || !widgetId || state.widgetRefineClickPulse?.widgetId === widgetId) return;
+    const widget = widgetRefineOutlineTarget(widgetId);
+    if (widget) strokeWidgetRefineOutline(context, widget, 1, widgetRefineCandidateForId(widgetId)?.instructionMode === "implicit-polish");
+  }
+  function triggerWidgetRefineClickPulse(widgetId) {
+    if (!widgetId) return;
+    state.widgetRefineClickPulse = { widgetId, startedAt:performance.now() };
+    requestInteractionLayerRender();
+  }
+  function drawWidgetRefineClickPulse(context) {
+    const pulse = state.widgetRefineClickPulse;
+    if (!pulse) return;
+    const elapsed = performance.now() - pulse.startedAt;
+    if (elapsed >= WIDGET_REFINE_CLICK_PULSE_MS) {
+      if (state.widgetRefineClickPulse === pulse) state.widgetRefineClickPulse = null;
+      return;
+    }
+    if (!["pen", "hand"].includes(state.mode)) return;
+    const widget = widgetRefineOutlineTarget(pulse.widgetId);
+    if (!widget) {
+      if (state.widgetRefineClickPulse === pulse) state.widgetRefineClickPulse = null;
+      return;
+    }
+    const progress = elapsed / WIDGET_REFINE_CLICK_PULSE_MS,
+      opacity = Math.sin(progress * Math.PI * 2) ** 2;
+    strokeWidgetRefineOutline(context, widget, opacity, widgetRefineCandidateForId(pulse.widgetId)?.instructionMode === "implicit-polish");
+    requestInteractionLayerRender();
+  }
+  function currentWidgetRefineConfirmation() {
+    const confirmation = state.widgetRefineConfirmation;
+    if (!confirmation) return null;
+    if (!validWidgetRefineCandidate(confirmation.candidate)) {
+      state.widgetRefineConfirmation = null;
+      return null;
+    }
+    const dirtyBox = confirmation.dirtyBox ? { ...confirmation.dirtyBox } : null,
+      hasDirty = Boolean(confirmation.hasDirty && dirtyBox);
+    return {
+      ...confirmation,
+      dirtyBox,
+      hasDirty,
+      instructionMode:hasDirty
+        ? confirmation.candidate.instructionMode === "nearby-dirty" ? "nearby-dirty" : "viewport-dirty"
+        : "implicit-polish",
+    };
+  }
+  function widgetRefineEdgeMidpoints(box) {
+    return [
+      { x:box.x, y:box.y + box.h / 2, axis:"horizontal" },
+      { x:box.x + box.w, y:box.y + box.h / 2, axis:"horizontal" },
+      { x:box.x + box.w / 2, y:box.y, axis:"vertical" },
+      { x:box.x + box.w / 2, y:box.y + box.h, axis:"vertical" },
+    ];
+  }
+  function widgetRefineConnectorPoints(fromBox, toBox) {
+    let closest = null;
+    for (const from of widgetRefineEdgeMidpoints(fromBox))
+      for (const to of widgetRefineEdgeMidpoints(toBox)) {
+        const distance = Math.hypot(to.x - from.x, to.y - from.y);
+        if (!closest || distance < closest.distance) closest = { from, to, distance };
+      }
+    if (!closest) return [];
+    const { from, to } = closest;
+    let points;
+    if (from.axis === to.axis) {
+      if (from.axis === "horizontal") {
+        const middleX = (from.x + to.x) / 2;
+        points = [from, { x:middleX, y:from.y }, { x:middleX, y:to.y }, to];
+      } else {
+        const middleY = (from.y + to.y) / 2;
+        points = [from, { x:from.x, y:middleY }, { x:to.x, y:middleY }, to];
+      }
+    } else if (from.axis === "horizontal") points = [from, { x:to.x, y:from.y }, to];
+    else points = [from, { x:from.x, y:to.y }, to];
+    return points.filter((point, index) => !index || point.x !== points[index - 1].x || point.y !== points[index - 1].y);
+  }
+  function drawWidgetRefineConfirmation(context) {
+    const confirmation = currentWidgetRefineConfirmation();
+    if (!confirmation) return;
+    const widget = widgetRefineOutlineTarget(confirmation.widgetId);
+    if (!widget) return;
+    strokeWidgetRefineOutline(context, widget, 1, !confirmation.hasDirty, true);
+    if (!confirmation.dirtyBox) return;
+    const box = confirmation.dirtyBox,
+      widgetBounds = widgetBox(widget),
+      unit = 1 / state.scale;
+    context.save();
+    context.strokeStyle = "#007aff";
+    context.lineWidth = 2 * unit;
+    context.setLineDash([]);
+    context.lineCap = context.lineJoin = "round";
+    context.strokeRect(box.x, box.y, box.w, box.h);
+    context.strokeStyle = "#007aff";
+    context.lineWidth = 2 * unit;
+    context.setLineDash([]);
+    const connector = widgetRefineConnectorPoints(box, widgetBounds);
+    if (connector.length > 1) {
+      context.beginPath();
+      context.moveTo(connector[0].x, connector[0].y);
+      for (const point of connector.slice(1)) context.lineTo(point.x, point.y);
+      context.stroke();
+    }
     context.restore();
   }
   function drawWidgetChrome(context) {
@@ -1997,9 +2553,11 @@
     context.save();
     context.strokeStyle = widget.pending ? "#72b7e5" : "#2679b8";
     context.lineWidth = 2 * unit;
-    context.setLineDash([7 * unit, 6 * unit]);
-    context.strokeRect(box.x, box.y, box.w, box.h);
-    context.setLineDash([]);
+    if (widget.pending) {
+      context.setLineDash([7 * unit, 6 * unit]);
+      context.strokeRect(box.x, box.y, box.w, box.h);
+      context.setLineDash([]);
+    }
     context.beginPath();
     drawResizeHandle(context, box, handle);
     context.moveTo(box.x + box.w + handle * 0.08, box.y + box.h / 2 - handle * 0.48);
@@ -2012,9 +2570,11 @@
   function positionImageEditBar() {
     const item = state.imageEdit ? selectedImage() : null;
     if (!item) {
+      imageEditBar.classList.remove("hand-toolbar-hiding");
       if (!imageEditBar.hidden) imageEditBar.hidden = true;
       return;
     }
+    imageEditBar.classList.toggle("hand-toolbar-hiding", Boolean(handToolbarRecord({ kind:"image", id:item.id })?.hiding));
     if (imageEditBar.hidden) imageEditBar.hidden = false;
     const rect = view.getBoundingClientRect(),
       box = imageBox(item),
@@ -2042,9 +2602,6 @@
     context.save();
     context.strokeStyle = "#2679b8";
     context.lineWidth = 2 * unit;
-    context.setLineDash([7 * unit, 6 * unit]);
-    context.strokeRect(box.x, box.y, box.w, box.h);
-    context.setLineDash([]);
     context.beginPath();
     drawResizeHandle(context, box, handle);
     context.moveTo(box.x + box.w + handle * 0.08, box.y + box.h / 2 - handle * 0.48);
@@ -2074,80 +2631,322 @@
     }
     return distance <= WIDGET_REFINE_PROXIMITY_PX ? { distance, hits } : null;
   }
+  function boxWidgetProximity(widget, box) {
+    if (!box) return null;
+    const target = widgetBox(widget),
+      dx = box.x + box.w < target.x ? target.x - box.x - box.w : target.x + target.w < box.x ? box.x - target.x - target.w : 0,
+      dy = box.y + box.h < target.y ? target.y - box.y - box.h : target.y + target.h < box.y ? box.y - target.y - target.h : 0,
+      distance = Math.hypot(dx, dy) * state.scale;
+    return distance <= WIDGET_REFINE_PROXIMITY_PX ? { distance, hits:intersection(box, target) ? 1 : 0 } : null;
+  }
+  function validWidgetRefineCandidate(candidate) {
+    return Boolean(candidate && state.widgets.includes(candidate.widget) && !candidate.widget.hiddenForReplacement
+      && !candidate.widget.pending && candidate.widget.shell && candidate.widget.renderActive !== false);
+  }
+  function widgetRefineHintHovered(candidate) {
+    return Boolean(candidate && (state.widgetRefineHoveredWidgetId === candidate.widgetId || state.widgetRefineButtonHoverId === candidate.widgetId));
+  }
+  function scheduleWidgetRefineHintRender() {
+    clearTimeout(state.widgetRefineHintTimer);
+    state.widgetRefineHintTimer = 0;
+    const now = Date.now(),
+      candidates = [state.widgetRefineCandidate, state.widgetRefineHoverCandidate],
+      next = candidates.reduce((deadline, candidate) => candidate && !widgetRefineHintHovered(candidate) && candidate.hintUntil > now
+        ? Math.min(deadline, candidate.hintUntil)
+        : deadline, Infinity);
+    if (!Number.isFinite(next)) return;
+    state.widgetRefineHintTimer = setTimeout(() => {
+      state.widgetRefineHintTimer = 0;
+      requestInteractionLayerRender();
+    }, Math.max(0, next - now));
+  }
+  function hideWidgetRefineHint() {
+    let changed = false;
+    for (const candidate of [state.widgetRefineCandidate, state.widgetRefineHoverCandidate]) {
+      if (!candidate || !candidate.hintUntil) continue;
+      candidate.hintUntil = 0;
+      changed = true;
+    }
+    if (changed) {
+      scheduleWidgetRefineHintRender();
+      requestInteractionLayerRender();
+    }
+  }
+  function widgetRefineHintVisible(candidate) {
+    return Boolean(candidate && (widgetRefineHintHovered(candidate) || candidate.hintUntil > Date.now()));
+  }
+  function clearWidgetRefineHoverCandidate() {
+    clearTimeout(state.widgetRefineHoverTimer);
+    state.widgetRefineHoverTimer = 0;
+    state.widgetRefineHoverCandidate = null;
+    scheduleWidgetRefineHintRender();
+  }
   function clearWidgetRefineCandidate() {
+    clearWidgetRefineHoverCandidate();
+    clearTimeout(state.widgetRefineHintTimer);
+    state.widgetRefineHintTimer = 0;
     state.widgetRefineCandidate = null;
+    state.widgetRefineConfirmation = null;
     requestInteractionLayerRender();
   }
   function dismissWidgetRefineCandidate() {
     clearWidgetRefineCandidate();
   }
-  function latchWidgetRefineCandidate(drawing) {
-    if (state.widgetRefineCandidate || state.mode === "hand" || state.pending || state.pendingWidget || state.pendingWidgetReplacement) return state.widgetRefineCandidate;
+  function latchWidgetRefineCandidate(input, kind = "stroke") {
+    if (state.widgetRefineCandidate || state.pending || state.pendingWidget || state.pendingWidgetReplacement) return state.widgetRefineCandidate;
     const candidates = [];
     for (const widget of visibleWidgets()) {
       if (!widget.shell || widget.renderActive === false || widget.pending) continue;
-      const dirty = strokeWidgetProximity(widget, drawing);
+      const dirty = kind === "text-box"
+        ? boxWidgetProximity(widget, textBoxBox(input))
+        : kind === "box"
+          ? boxWidgetProximity(widget, input)
+          : strokeWidgetProximity(widget, input);
       if (!dirty) continue;
       candidates.push({
         widget,
         widgetId:widget.id,
         instructionMode:"nearby-dirty",
+        hintKey:"widgetRefineNearbyHint",
+        hintUntil:Date.now() + WIDGET_REFINE_HINT_MS,
         distance:dirty.distance,
         hits:dirty.hits,
       });
     }
     candidates.sort((a, b) => a.distance - b.distance || b.hits - a.hits || state.widgets.indexOf(b.widget) - state.widgets.indexOf(a.widget));
     state.widgetRefineCandidate = candidates[0] || null;
-    if (state.widgetRefineCandidate) requestInteractionLayerRender();
+    if (state.widgetRefineCandidate) {
+      scheduleWidgetRefineHintRender();
+      requestInteractionLayerRender();
+    }
     return state.widgetRefineCandidate;
+  }
+  function relatchWidgetRefineCandidateFromDirty() {
+    clearWidgetRefineCandidate();
+    if (state.hotspotTrail.length) {
+      const strokeCandidate = latchWidgetRefineCandidate({
+        trail:state.hotspotTrail,
+        last:state.hotspotTrail.at(-1),
+        erase:false,
+      });
+      if (strokeCandidate) return strokeCandidate;
+    }
+    for (const id of state.dirtyTextBoxIds) {
+      const item = state.textBoxes.find((candidate) => candidate.id === id);
+      if (item && latchWidgetRefineCandidate(item, "text-box")) return state.widgetRefineCandidate;
+    }
+    for (const id of state.dirtyImageIds) {
+      const item = state.images.find((candidate) => candidate.id === id);
+      if (item && latchWidgetRefineCandidate(imageBox(item), "box")) return state.widgetRefineCandidate;
+    }
+    return null;
   }
   function currentWidgetRefineCandidate() {
     const candidate = state.widgetRefineCandidate;
-    if (!candidate || state.mode === "hand") return null;
-    if (!state.widgets.includes(candidate.widget) || candidate.widget.hiddenForReplacement || candidate.widget.pending || candidate.widget.renderActive === false) {
+    if (!candidate) return null;
+    if (!validWidgetRefineCandidate(candidate)) {
       state.widgetRefineCandidate = null;
       return null;
     }
     return candidate;
   }
+  function currentWidgetRefineHoverCandidate() {
+    const candidate = state.widgetRefineHoverCandidate;
+    if (!candidate) return null;
+    if (!validWidgetRefineCandidate(candidate) || candidate.expiresAt && candidate.expiresAt <= Date.now()) {
+      clearWidgetRefineHoverCandidate();
+      return null;
+    }
+    return candidate;
+  }
+  function viewportHasWidgetRefineInput() {
+    const visible = viewportRect();
+    return Boolean(state.dirty && visible && intersection(state.dirty, visible));
+  }
+  function selectedWidgetRefineCandidate(widget, persistentCandidate, hoverCandidate) {
+    if (!widget || activeWidgetRefinement()) return null;
+    if (persistentCandidate?.widget === widget) return persistentCandidate;
+    if (hoverCandidate?.widget === widget) return hoverCandidate;
+    const hasDirty = viewportHasWidgetRefineInput();
+    return {
+      widget,
+      widgetId:widget.id,
+      instructionMode:hasDirty ? "viewport-dirty" : "implicit-polish",
+      hintKey:hasDirty ? "widgetRefineViewportHint" : "widgetRefineNoInputHint",
+      hintUntil:0,
+      expiresAt:0,
+    };
+  }
+  function widgetAtRefinePoint(point) {
+    if (!point || !valid(point)) return null;
+    const widgets = visibleWidgets(),
+      padding = state.mode === "hand" ? 12 / Math.max(.03, state.scale) : 0;
+    for (let index = widgets.length - 1; index >= 0; index--) {
+      const widget = widgets[index], box = widgetBox(widget);
+      if (widget.shell && widget.renderActive !== false && point.x >= box.x - padding && point.x <= box.x + box.w + padding && point.y >= box.y - padding && point.y <= box.y + box.h + padding) return widget;
+    }
+    return null;
+  }
+  function scheduleWidgetRefineHoverClear() {
+    const candidate = currentWidgetRefineHoverCandidate();
+    if (!candidate || state.widgetRefineHoverTimer || widgetRefineHintHovered(candidate)) return;
+    candidate.expiresAt = Date.now() + WIDGET_REFINE_HOVER_GRACE_MS;
+    state.widgetRefineHoverTimer = setTimeout(() => {
+      state.widgetRefineHoverTimer = 0;
+      if (widgetRefineHintHovered(candidate)) return;
+      if (state.widgetRefineHoverCandidate === candidate) state.widgetRefineHoverCandidate = null;
+      scheduleWidgetRefineHintRender();
+      requestInteractionLayerRender();
+    }, WIDGET_REFINE_HOVER_GRACE_MS);
+  }
+  function setWidgetRefineHoverCandidate(widget, showHint = true) {
+    if (!widget || activeWidgetRefinement()) return null;
+    const hasDirty = viewportHasWidgetRefineInput();
+    clearTimeout(state.widgetRefineHoverTimer);
+    state.widgetRefineHoverTimer = 0;
+    let candidate = state.widgetRefineHoverCandidate;
+    if (!candidate || candidate.widget !== widget || candidate.hasDirty !== hasDirty) candidate = {
+      widget,
+      widgetId:widget.id,
+      hasDirty,
+      instructionMode:hasDirty ? "viewport-dirty" : "implicit-polish",
+      hintKey:hasDirty ? "widgetRefineViewportHint" : "widgetRefineNoInputHint",
+      hintUntil:showHint ? Date.now() + WIDGET_REFINE_HINT_MS : 0,
+      expiresAt:0,
+    };
+    candidate.expiresAt = 0;
+    state.widgetRefineHoverCandidate = candidate;
+    return candidate;
+  }
+  function beginWidgetRefineTouch(pointerId, widget) {
+    if (!pointerId || !widget || state.mode !== "pen") return null;
+    const candidate = setWidgetRefineHoverCandidate(widget, false);
+    if (!candidate) return null;
+    widgetRefineTouchCandidates.set(pointerId, candidate);
+    state.widgetRefineHoveredWidgetId = widget.id;
+    scheduleWidgetRefineHintRender();
+    requestInteractionLayerRender();
+    return candidate;
+  }
+  function finishWidgetRefineTouch(pointerId) {
+    const candidate = widgetRefineTouchCandidates.get(pointerId);
+    if (!candidate) return;
+    widgetRefineTouchCandidates.delete(pointerId);
+    if (![...widgetRefineTouchCandidates.values()].some(item => item.widgetId === candidate.widgetId)
+      && state.widgetRefineHoveredWidgetId === candidate.widgetId) state.widgetRefineHoveredWidgetId = null;
+    if (state.widgetRefineHoverCandidate === candidate) scheduleWidgetRefineHoverClear();
+    scheduleWidgetRefineHintRender();
+    requestInteractionLayerRender();
+  }
+  function updateWidgetRefinePointer(point) {
+    state.widgetRefinePointer = point && valid(point) ? point : null;
+    const widget = ["pen", "hand"].includes(state.mode) ? widgetAtRefinePoint(state.widgetRefinePointer) : null,
+      previousHoverId = state.widgetRefineHoveredWidgetId,
+      previousCandidate = state.widgetRefineHoverCandidate;
+    const hasDirty = viewportHasWidgetRefineInput();
+    state.widgetRefineHoveredWidgetId = widget?.id || null;
+    if (widget && !activeWidgetRefinement()) {
+      const candidate = setWidgetRefineHoverCandidate(widget);
+      if (candidate && hasDirty) Object.assign(candidate, {
+        instructionMode:"viewport-dirty",
+        hintKey:"widgetRefineViewportHint",
+      });
+    }
+    else scheduleWidgetRefineHoverClear();
+    if (previousHoverId !== state.widgetRefineHoveredWidgetId || previousCandidate !== state.widgetRefineHoverCandidate) {
+      scheduleWidgetRefineHintRender();
+      requestInteractionLayerRender();
+    }
+  }
+  function refreshWidgetRefineHoverCandidate() {
+    updateWidgetRefinePointer(state.widgetRefinePointer);
+  }
+  function objectChromeAnchor(element) {
+    if (!element?.getBoundingClientRect) return null;
+    const rect = element.getBoundingClientRect(),
+      viewRect = view.getBoundingClientRect(),
+      anchor = {
+        x:rect.left - viewRect.left,
+        y:rect.top - viewRect.top,
+        width:rect.width,
+        height:rect.height,
+      };
+    return Object.values(anchor).every(Number.isFinite) && anchor.width > 0 && anchor.height > 0 ? anchor : null;
+  }
+  function beginWidgetRefineConfirmation(candidate, anchor = null) {
+    if (!validWidgetRefineCandidate(candidate) || activeWidgetRefinement()) return false;
+    const visible = viewportRect(),
+      dirtyBox = state.dirty && visible ? intersection(state.dirty, visible) : null,
+      hasDirty = Boolean(dirtyBox);
+    clearTimeout(state.timer);
+    state.timer = 0;
+    state.widgetRefineConfirmation = {
+      candidate,
+      widget:candidate.widget,
+      widgetId:candidate.widgetId,
+      anchor:anchor ? { ...anchor } : null,
+      dirtyBox:dirtyBox ? { ...dirtyBox } : null,
+      hasDirty,
+      instructionMode:hasDirty
+        ? candidate.instructionMode === "nearby-dirty" ? "nearby-dirty" : "viewport-dirty"
+        : "implicit-polish",
+    };
+    state.widgetRefineButtonHoverId = null;
+    requestInteractionLayerRender();
+    return true;
+  }
+  function cancelWidgetRefineConfirmation() {
+    if (!state.widgetRefineConfirmation) return false;
+    clearWidgetRefineCandidate();
+    if (state.auto && state.dirty && state.autoEligible) schedule(state.autoDelayMs);
+    return true;
+  }
+  function confirmWidgetRefinement() {
+    const confirmation = currentWidgetRefineConfirmation();
+    if (!confirmation) return false;
+    state.widgetRefineConfirmation = null;
+    triggerWidgetRefineClickPulse(confirmation.widgetId);
+    return requestWidgetRefinement(confirmation.widget, confirmation.instructionMode);
+  }
   async function copyWidgetSource(widget) {
-    if (!widget || typeof widget.copyText !== "string" || !widget.copyText) return false;
-    const copied = await writeClipboardText(widget.copyText);
+    const source = widgetCopySource(widget);
+    if (!source) return false;
+    const copied = await writeClipboardText(source);
     setStatusKey(copied ? "widgetSourceCopied" : "widgetSourceCopyFailed");
     return copied;
   }
   function widgetEditContext(widget, instructionMode) {
+    const sourceMirrorsHtml = widgetUsesHtmlCopySource(widget);
     return {
       mode:"replace",
       widgetType:widget.widgetType,
       pluginId:widget.pluginId,
       title:widget.title,
+      refreshSeconds:widget.refreshSeconds,
       instructionMode,
       box:widgetBox(widget),
       ...(widget.diagramKind ? { diagramKind:widget.diagramKind } : {}),
       ...(widget.sourceFormat ? { sourceFormat:widget.sourceFormat } : {}),
       ...(widget.frameworkVersion ? { frameworkVersion:widget.frameworkVersion } : {}),
       ...(widget.widgetType === "diagram_source" ? { source:widget.source } : { html:widget.html }),
-      ...(widget.widgetType !== "diagram_source" && widget.copyText ? { source:widget.copyText, copyLabel:widget.copyLabel } : {}),
+      ...(sourceMirrorsHtml ? { sourceMirrorsHtml:true } : widget.widgetType !== "diagram_source" && widget.copyText ? { source:widget.copyText, copyLabel:widget.copyLabel } : {}),
+      ...(widget.widgetType === "html_widget" && widget.runtimeDiagnostics?.errors?.length ? { runtimeDiagnostics:widget.runtimeDiagnostics } : {}),
     };
   }
-  async function requestWidgetRefinement(widget, instructionMode) {
-    if (!widget || state.mode === "hand" || !state.widgets.includes(widget) || widget.hiddenForReplacement || state.pendingWidget || state.pendingWidgetReplacement) return false;
-    const revision = state.userRevision;
+  function requestWidgetRefinement(widget, instructionMode) {
+    if (!widget || activeWidgetRefinement() || !["pen", "hand"].includes(state.mode) || !state.widgets.includes(widget) || widget.hiddenForReplacement || state.pendingWidget || state.pendingWidgetReplacement) return false;
+    clearTimeout(state.timer);
+    state.timer = 0;
     clearWidgetRefineCandidate();
     supersedeActiveAI("widget-refine");
     setStatusKey("widgetRefining");
-    try {
-      await requestWidgetSnapshot(widget);
-    } catch (error) {
-      if (state.userRevision === revision) setStatus(`${t("aiError")}${error.message}`);
-      return false;
-    }
-    if (state.userRevision !== revision || !state.widgets.includes(widget) || widget.hiddenForReplacement) return false;
+    const visible = viewportRect(),
+      refineInputBox = state.dirty && visible ? intersection(state.dirty, visible) : null;
     void requestAI("answer", null, {
       captureCurrentViewport:true,
       widgetEditTarget:widget,
       widgetEditContext:widgetEditContext(widget, instructionMode),
+      attentionBox:refineInputBox,
     });
     return true;
   }
@@ -2172,41 +2971,54 @@
   function addWidgetToolSpecs(specs, widget, options = {}) {
     if (!widget) return;
     const box = widgetBox(widget),
-      items = [];
-    if (options.copy && widget.copyText) items.push({
+      items = [],
+      copyLabel = widgetCopySourceLabel(widget);
+    if (options.copy && copyLabel) items.push({
       key:`widget:${widget.id}:tool-copy`,
       kind:"copy",
-      label:widget.copyLabel || (widget.sourceFormat ? `Copy ${widget.sourceFormat}` : t("copyText")),
-      baseWidth:widgetToolLabelWidth(widget.copyLabel || `Copy ${widget.sourceFormat || "source"}`, 118),
+      label:copyLabel,
+      baseWidth:widgetToolLabelWidth(copyLabel, 118),
       activate:() => void copyWidgetSource(widget),
     });
-    if (options.refine) items.push({
+    if (options.refine && state.widgetRefineConfirmation?.widgetId !== widget.id) items.push({
       key:`widget:${widget.id}:tool-refine`,
       kind:"refine",
       label:t("widgetRefine"),
       baseWidth:112,
-      activate:() => void requestWidgetRefinement(widget, options.refine.instructionMode),
+      refineCandidate:options.refine,
+      activate:(button) => void beginWidgetRefineConfirmation(options.refine, objectChromeAnchor(button)),
     });
     if (!items.length) return;
     const gap = 4,
-      groupBaseWidth = items.reduce((sum, item) => sum + item.baseWidth, 0) + gap * (items.length - 1),
+      groupHorizontalWidth = items.reduce((sum, item) => sum + item.baseWidth, 0) + gap * (items.length - 1),
+      groupVerticalWidth = Math.max(...items.map(item => item.baseWidth)),
+      groupVerticalHeight = items.length * 34 + gap * (items.length - 1),
       controlScale = 1,
       widgetToolGroup = `widget-${widget.id}`;
-    let groupOffset = 0;
-    for (const item of items) {
+    let horizontalOffset = 0;
+    for (let index = 0; index < items.length; index++) {
+      const item = items[index];
       specs.push({
         ...item,
         box,
         widget,
         widgetTool:true,
         widgetToolGroup,
-        groupBaseWidth,
-        groupOffset,
+        groupRefineCandidate:options.refine || null,
+        groupItemCount:items.length,
+        groupHorizontalWidth,
+        groupVerticalWidth,
+        groupVerticalHeight,
+        groupHorizontalOffset:horizontalOffset,
+        groupVerticalOffset:index * (34 + gap),
         controlScale,
         baseHeight:34,
+        handToolbar:Boolean(options.handToolbar),
+        handToolbarKey:options.handToolbarKey || "",
+        handToolbarHiding:Boolean(options.handToolbarHiding),
         priority:6,
       });
-      groupOffset += item.baseWidth + gap;
+      horizontalOffset += item.baseWidth + gap;
     }
   }
   function objectChromePosition(box, kind, ignoreKey = "", spec = null) {
@@ -2227,19 +3039,23 @@
       above = screenBox.top - height - chromeGap,
       y = clampY(above >= 6 ? above : screenBox.top + chromeGap);
     if (spec?.widgetTool) {
-      const groupWidth = spec.groupBaseWidth * controlScale,
-        groupHeight = height,
+      const horizontalWidth = spec.groupHorizontalWidth * controlScale,
+        verticalWidth = spec.groupVerticalWidth * controlScale,
+        verticalHeight = spec.groupVerticalHeight * controlScale,
+        hintSpace = spec.groupRefineCandidate && widgetRefineHintVisible(spec.groupRefineCandidate) ? 88 : 0,
         gap = chromeGap * controlScale,
-        clampGroupX = (value) => Math.max(6, Math.min(Math.max(6, viewportWidth - groupWidth - 6), value)),
-        clampGroupY = (value) => Math.max(6, Math.min(Math.max(6, viewportHeight - groupHeight - 6), value)),
         positions = [
-          { x:right - groupWidth, y:screenBox.top - groupHeight - gap },
-          { x:right + gap, y:screenBox.top },
-          { x:right + gap, y:screenBox.top + screenBox.height / 2 - groupHeight / 2 },
-          { x:right - groupWidth, y:bottom + gap },
-          { x:screenBox.left, y:bottom + gap },
-          { x:screenBox.left - groupWidth - gap, y:screenBox.top + screenBox.height / 2 - groupHeight / 2 },
-        ].map(position => ({ x:clampGroupX(position.x), y:clampGroupY(position.y) })),
+          { side:"top", layout:"horizontal", x:right - horizontalWidth, y:screenBox.top - height - gap, w:horizontalWidth, h:height },
+          { side:"right", layout:"vertical", x:right + gap, y:screenBox.top, w:verticalWidth, h:verticalHeight },
+          { side:"right", layout:"vertical", x:right + gap, y:screenBox.top + screenBox.height / 2 - verticalHeight / 2, w:verticalWidth, h:verticalHeight },
+          { side:"bottom", layout:"horizontal", x:right - horizontalWidth, y:bottom + gap, w:horizontalWidth, h:height },
+          { side:"bottom", layout:"horizontal", x:screenBox.left, y:bottom + gap, w:horizontalWidth, h:height },
+          { side:"left", layout:"vertical", x:screenBox.left - verticalWidth - gap, y:screenBox.top + screenBox.height / 2 - verticalHeight / 2, w:verticalWidth, h:verticalHeight },
+        ].map(position => ({
+          ...position,
+          x:Math.max(6, Math.min(Math.max(6, viewportWidth - position.w - 6), position.x)),
+          y:Math.max(6, Math.min(Math.max(6, viewportHeight - position.h - hintSpace - 12), position.y)),
+        })),
         viewRect = view.getBoundingClientRect(),
         obstacles = [...document.querySelectorAll(".top-row, .toolbar, .animation-controls:not([hidden]), .image-edit-bar:not([hidden]), .selection-context-toolbar, .text-editor, .ai-embodiment, .object-chrome-button")]
           .filter(element => element.dataset.objectChromeKey !== ignoreKey && element.dataset.widgetToolGroup !== spec.widgetToolGroup)
@@ -2247,11 +3063,13 @@
           const rect = element.getBoundingClientRect();
           return { x:rect.left - viewRect.left, y:rect.top - viewRect.top, w:rect.width, h:rect.height };
         }),
-        overlapsObstacle = position => obstacles.some(obstacle => position.x < obstacle.x + obstacle.w + 5 && position.x + groupWidth + 5 > obstacle.x && position.y < obstacle.y + obstacle.h + 5 && position.y + groupHeight + 5 > obstacle.y),
+        overlapsObstacle = position => obstacles.some(obstacle => position.x < obstacle.x + obstacle.w + 5 && position.x + position.w + 5 > obstacle.x && position.y < obstacle.y + obstacle.h + 5 && position.y + position.h + 5 > obstacle.y),
         groupPosition = positions.find(position => !overlapsObstacle(position)) || positions[0];
+      const vertical = groupPosition.layout === "vertical",
+        alignRight = vertical && groupPosition.side === "left";
       return {
-        x:groupPosition.x + spec.groupOffset * controlScale,
-        y:groupPosition.y,
+        x:groupPosition.x + (vertical ? alignRight ? groupPosition.w - width : 0 : spec.groupHorizontalOffset * controlScale),
+        y:groupPosition.y + (vertical ? spec.groupVerticalOffset * controlScale : 0),
         scale:controlScale,
         baseWidth,
         baseHeight,
@@ -2272,6 +3090,69 @@
     if (kind === "refine") return t("widgetRefine");
     return t("hand");
   }
+  function widgetRefineConfirmationPosition(anchor, width, height, viewportWidth, viewportHeight) {
+    const safeAnchor = anchor && [anchor.x, anchor.y, anchor.width, anchor.height].every(Number.isFinite)
+        ? anchor
+        : { x:8, y:8, width:0, height:0 },
+      min = 8,
+      maxX = Math.max(min, viewportWidth - width - min),
+      maxY = Math.max(min, viewportHeight - height - min);
+    return {
+      x:Math.max(min, Math.min(maxX, safeAnchor.x + safeAnchor.width / 2 - width / 2)),
+      y:Math.max(min, Math.min(maxY, safeAnchor.y + safeAnchor.height / 2 - height / 2)),
+    };
+  }
+  function syncWidgetRefineConfirmation() {
+    const confirmation = currentWidgetRefineConfirmation();
+    if (!confirmation) {
+      if (widgetRefineConfirmationElement) {
+        widgetRefineConfirmationElement.remove();
+        widgetRefineConfirmationElement = null;
+      }
+      return;
+    }
+    const widget = widgetRefineOutlineTarget(confirmation.widgetId);
+    if (!widget) return;
+    if (!widgetRefineConfirmationElement) {
+      const element = document.createElement("div"),
+        copy = document.createElement("span"),
+        yes = document.createElement("button"),
+        no = document.createElement("button");
+      element.className = "widget-refine-confirmation";
+      copy.className = "widget-refine-confirmation-copy";
+      yes.className = "widget-refine-confirmation-button confirm";
+      no.className = "widget-refine-confirmation-button cancel";
+      yes.type = no.type = "button";
+      yes.innerHTML = OBJECT_CHROME_ICONS.accept;
+      no.innerHTML = OBJECT_CHROME_ICONS.cancel;
+      yes.setAttribute("aria-label", t("widgetRefineConfirm"));
+      no.setAttribute("aria-label", t("widgetRefineCancel"));
+      yes.addEventListener("click", event => { event.preventDefault(); event.stopPropagation(); confirmWidgetRefinement(); });
+      no.addEventListener("click", event => { event.preventDefault(); event.stopPropagation(); cancelWidgetRefineConfirmation(); });
+      element.append(copy, yes, no);
+      objectChromeLayer.append(element);
+      widgetRefineConfirmationElement = element;
+    }
+    const element = widgetRefineConfirmationElement,
+      copy = element.querySelector(".widget-refine-confirmation-copy"),
+      width = Math.max(180, Math.min(560, view.clientWidth - 24)),
+      declaration = runtimeElementStyle(element, "widget-refine-confirmation");
+    copy.textContent = t(confirmation.hasDirty ? "widgetRefineConfirmDirty" : "widgetRefineConfirmNoInput");
+    element.classList.toggle("no-input", !confirmation.hasDirty);
+    declaration?.setProperty("--widget-refine-confirm-width", `${width.toFixed(1)}px`);
+    const layoutWidth = Math.max(width, element.offsetWidth || width),
+      height = Math.max(42, element.offsetHeight || 42),
+      screenBox = screenObjectBox(widgetBox(widget)),
+      fallbackAnchor = {
+        x:screenBox.left + screenBox.width / 2 - 56,
+        y:Math.max(8, screenBox.top - 41),
+        width:112,
+        height:34,
+      },
+      position = widgetRefineConfirmationPosition(confirmation.anchor || fallbackAnchor, layoutWidth, height, view.clientWidth, view.clientHeight);
+    declaration?.setProperty("--widget-refine-confirm-x", `${position.x.toFixed(1)}px`);
+    declaration?.setProperty("--widget-refine-confirm-y", `${position.y.toFixed(1)}px`);
+  }
   function beginObjectChromeMove(event, spec) {
     if (state.mode !== "hand" || Number(event.button) !== 0) return false;
     const point = clientPoint(event);
@@ -2287,12 +3168,20 @@
       started = beginImageGesture(event, point, { image:spec.object, hit:"move" });
     } else if (spec.target === "animation") {
       started = beginAnimationGesture(event, point, { animation:spec.object, hit:"move" });
+    } else if (spec.target === "text-box") {
+      const item = spec.object;
+      if (item && state.textBoxes.includes(item)) {
+        recordTextBoxesBefore();
+        state.textBoxGesture = { id:event.pointerId, item, startClientX:event.clientX, startClientY:event.clientY, startX:item.x, startY:item.y, changed:false };
+        started = true;
+      }
     }
     if (!started) return false;
     try { objectChromeLayer.setPointerCapture(event.pointerId); } catch {}
     return true;
   }
   function finishObjectChromeGesture(event) {
+    finishHandToolbarOperation(event.pointerId);
     if (state.pendingGesture?.id === event.pointerId && !state.pendingGesture.copy) {
       state.pendingGesture = null;
       resetCanvasCursor();
@@ -2302,26 +3191,110 @@
     if (state.widgetGesture?.id === event.pointerId) return finishWidgetGesture(event);
     if (state.imageGesture?.id === event.pointerId) return finishImageGesture(event);
     if (state.animationGesture?.id === event.pointerId) return finishAnimationGesture(event);
+    if (state.textBoxGesture?.id === event.pointerId) return finishTextBoxChromeGesture(event);
     return false;
+  }
+  function updateTextBoxChromeGesture(event) {
+    const gesture = state.textBoxGesture;
+    if (!gesture || gesture.id !== event.pointerId || !state.textBoxes.includes(gesture.item)) return false;
+    const item = gesture.item,
+      scale = Math.max(.03, state.scale),
+      x = Math.max(0, Math.min(SIZE - item.w, gesture.startX + (event.clientX - gesture.startClientX) / scale)),
+      y = Math.max(0, Math.min(SIZE - item.h, gesture.startY + (event.clientY - gesture.startClientY) / scale));
+    if (x === item.x && y === item.y) return true;
+    item.x = x;
+    item.y = y;
+    gesture.changed = true;
+    requestRender();
+    return true;
+  }
+  function finishTextBoxChromeGesture(event) {
+    const gesture = state.textBoxGesture;
+    if (!gesture || gesture.id !== event.pointerId) return false;
+    state.textBoxGesture = null;
+    if (gesture.changed) {
+      state.userRevision++;
+      state.dirtyTextBoxIds.add(gesture.item.id);
+      recomputeDirtyBounds();
+      state.autoEligible = true;
+      save();
+      const refineCandidate = latchWidgetRefineCandidate(gesture.item, "text-box");
+      if (state.auto && !refineCandidate) schedule(Math.max(1000, state.autoDelayMs));
+      if (refineCandidate) setStatusKey("widgetRefinePending");
+      refreshHandObjectToolbar();
+    } else {
+      state.textBoxHistoryBefore = null;
+      editTextBox(gesture.item);
+    }
+    requestRender();
+    return true;
   }
   function createObjectChromeButton(key, kind) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `object-chrome-button ${kind}`;
     button.dataset.objectChromeKey = key;
-    button.innerHTML = ["copy", "refine"].includes(kind) ? `${OBJECT_CHROME_ICONS[kind]}<span></span>` : OBJECT_CHROME_ICONS[kind];
+    button.innerHTML = ["copy", "refine"].includes(kind) ? `${OBJECT_CHROME_ICONS[kind]}<span class="object-chrome-label"></span>${kind === "refine" ? '<span class="widget-refine-hint" hidden></span>' : ""}` : OBJECT_CHROME_ICONS[kind];
     ensureObjectChromeStyleRule(button);
     button.addEventListener("pointerdown", (event) => {
-      event.stopPropagation();
-      if (kind !== "move") return;
       event.preventDefault();
+      event.stopPropagation();
+      finishStaleWidgetHostGesture(event);
+      if (button.penechoSpec?.handToolbar) {
+        beginHandToolbarOperation(event.pointerId, button.penechoSpec.handToolbarKey);
+        if (kind === "move") activateHandObjectToolbar(button.penechoSpec.handToolbarKey);
+        refreshHandObjectToolbar(button.penechoSpec.handToolbarKey);
+      }
+      if (kind !== "move") {
+        try { button.setPointerCapture(event.pointerId); } catch {}
+        return;
+      }
       beginObjectChromeMove(event, button.penechoSpec);
     });
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      if (kind !== "move") button.penechoSpec?.activate?.();
+      if (kind === "move") return;
+      if (kind === "refine") triggerWidgetRefineClickPulse(button.penechoSpec?.refineCandidate?.widgetId);
+      button.penechoSpec?.activate?.(button);
     });
+    button.addEventListener("pointerenter", (event) => {
+      const key = button.penechoSpec?.handToolbarKey;
+      if (key) setHandToolbarHold(key, `chrome-hover:${event.pointerId}:${key}`, true);
+    });
+    button.addEventListener("pointerleave", (event) => {
+      const key = button.penechoSpec?.handToolbarKey;
+      if (key) setHandToolbarHold(key, `chrome-hover:${event.pointerId}:${key}`, false);
+    });
+    button.addEventListener("focus", () => {
+      const key = button.penechoSpec?.handToolbarKey;
+      if (key) setHandToolbarHold(key, `chrome-focus:${key}`, true);
+    });
+    button.addEventListener("blur", () => {
+      const key = button.penechoSpec?.handToolbarKey;
+      if (key) setHandToolbarHold(key, `chrome-focus:${key}`, false);
+    });
+    if (kind === "refine") {
+      button.addEventListener("pointerenter", () => {
+        const candidate = button.penechoSpec?.refineCandidate;
+        if (!candidate) return;
+        state.widgetRefineButtonHoverId = candidate.widgetId;
+        if (state.widgetRefineHoverCandidate === candidate) {
+          clearTimeout(state.widgetRefineHoverTimer);
+          state.widgetRefineHoverTimer = 0;
+          candidate.expiresAt = 0;
+        }
+        scheduleWidgetRefineHintRender();
+        requestInteractionLayerRender();
+      });
+      button.addEventListener("pointerleave", () => {
+        const candidate = button.penechoSpec?.refineCandidate;
+        if (state.widgetRefineButtonHoverId === candidate?.widgetId) state.widgetRefineButtonHoverId = null;
+        if (state.widgetRefineHoverCandidate === candidate) scheduleWidgetRefineHoverClear();
+        scheduleWidgetRefineHintRender();
+        requestInteractionLayerRender();
+      });
+    }
     objectChromeLayer.append(button);
     objectChromeButtons.set(key, button);
     return button;
@@ -2363,31 +3336,39 @@
     else add("pending", draftBounds(pending));
   }
   function objectChromeSpecs() {
+    const persistentCandidate = currentWidgetRefineCandidate(),
+      hoverCandidate = currentWidgetRefineHoverCandidate(),
+      editWidget = state.mode === "hand" && state.widgetEdit ? selectedWidget() : null;
     if (state.mode !== "hand") {
-      const specs = [],
-        candidate = currentWidgetRefineCandidate();
-      if (candidate) addWidgetToolSpecs(specs, candidate.widget, { refine:candidate });
+      const specs = [];
+      if (persistentCandidate) addWidgetToolSpecs(specs, persistentCandidate.widget, { refine:persistentCandidate });
+      if (hoverCandidate && hoverCandidate.widget !== persistentCandidate?.widget) addWidgetToolSpecs(specs, hoverCandidate.widget, { refine:hoverCandidate });
       return specs;
     }
     const specs = [];
-    for (const image of visibleImages()) specs.push({ key:`image:${image.id}:move`, kind:"move", box:imageBox(image), target:"image", object:image, priority:1 });
-    for (const animation of visibleAnimations()) specs.push({ key:`animation:${animation.id}:move`, kind:"move", box:animationBox(animation), target:"animation", object:animation, priority:1 });
-    for (const widget of visibleWidgets()) specs.push({ key:`widget:${widget.id}:move`, kind:"move", box:widgetBox(widget), target:"widget", object:widget, priority:2 });
-    if (state.animationEdit) {
-      const animation = selectedAnimation();
-      if (animation) {
-        const box = animationBox(animation);
-        specs.push({ key:`animation:${animation.id}:cancel`, kind:"cancel", box, activate:cancelAnimationEdit, priority:3 });
-        specs.push({ key:`animation:${animation.id}:accept`, kind:"accept", box, activate:acceptAnimationEdit, priority:3 });
-      }
-    }
-    if (state.widgetEdit) {
-      const widget = selectedWidget();
-      if (widget) {
-        const box = widgetBox(widget);
-        specs.push({ key:`widget:${widget.id}:cancel`, kind:"cancel", box, activate:() => deleteWidget(widget), priority:3 });
-        specs.push({ key:`widget:${widget.id}:accept`, kind:"accept", box, activate:acceptWidgetEdit, priority:3 });
-        addWidgetToolSpecs(specs, widget, { copy:true });
+    for (const [key, record] of state.handToolbarTargets) {
+      const handTarget = handToolbarObject(record),
+        shared = { handToolbar:true, handToolbarKey:key, handToolbarHiding:Boolean(record.hiding) };
+      if (!handTarget) continue;
+      if (record.kind === "text-box" && !state.textEditors.size) {
+        specs.push({ key:`text-box:${handTarget.id}:move`, kind:"move", box:textBoxBox(handTarget), target:"text-box", object:handTarget, ...shared, priority:2 });
+      } else if (record.kind === "image") {
+        specs.push({ key:`image:${handTarget.id}:move`, kind:"move", box:imageBox(handTarget), target:"image", object:handTarget, ...shared, priority:2 });
+      } else if (record.kind === "animation") {
+        const box = animationBox(handTarget);
+        specs.push({ key:`animation:${handTarget.id}:move`, kind:"move", box, target:"animation", object:handTarget, ...shared, priority:2 });
+        if (record.expanded && state.handToolbarActiveKey === key && state.animationEdit?.id === handTarget.id) {
+          specs.push({ key:`animation:${handTarget.id}:cancel`, kind:"cancel", box, activate:cancelAnimationEdit, ...shared, priority:3 });
+          specs.push({ key:`animation:${handTarget.id}:accept`, kind:"accept", box, activate:acceptAnimationEdit, ...shared, priority:3 });
+        }
+      } else if (record.kind === "widget") {
+        const box = widgetBox(handTarget);
+        specs.push({ key:`widget:${handTarget.id}:move`, kind:"move", box, target:"widget", object:handTarget, ...shared, priority:2 });
+        if (record.expanded && state.handToolbarActiveKey === key && state.widgetEdit?.id === handTarget.id && editWidget === handTarget) {
+          specs.push({ key:`widget:${handTarget.id}:cancel`, kind:"cancel", box, activate:() => deleteWidget(handTarget), ...shared, priority:3 });
+          specs.push({ key:`widget:${handTarget.id}:accept`, kind:"accept", box, activate:acceptWidgetEdit, ...shared, priority:3 });
+          addWidgetToolSpecs(specs, handTarget, { copy:true, handToolbar:true, handToolbarKey:key, handToolbarHiding:Boolean(record.hiding) });
+        }
       }
     }
     pendingChromeSpecs(specs, state.pending);
@@ -2404,6 +3385,7 @@
   function syncObjectChrome() {
     if (!objectChromeLayer) return;
     const active = new Set();
+    let removedHoveredRefineButton = false;
     for (const spec of objectChromeSpecs()) {
       const button = objectChromeButtons.get(spec.key) || createObjectChromeButton(spec.key, spec.kind),
         position = objectChromePosition(spec.box, spec.kind, spec.key, spec);
@@ -2413,12 +3395,26 @@
         declaration = (button.penechoStyleRule || ensureObjectChromeStyleRule(button))?.["style"];
       button.penechoSpec = spec;
       button.classList.toggle("widget-tool", Boolean(spec.widgetTool));
-      button.classList.toggle("solo-widget-tool", Boolean(spec.widgetTool && spec.groupBaseWidth === spec.baseWidth));
+      button.classList.toggle("solo-widget-tool", Boolean(spec.widgetTool && spec.groupItemCount === 1));
+      button.classList.toggle("hand-toolbar-control", Boolean(spec.handToolbar));
+      button.classList.toggle("hand-toolbar-hiding", Boolean(spec.handToolbar && spec.handToolbarHiding));
+      button.classList.toggle("refine-no-input", Boolean(spec.refineCandidate?.instructionMode === "implicit-polish"));
+      button.classList.toggle("refine-hovered", Boolean(spec.refineCandidate && widgetRefineHintHovered(spec.refineCandidate)));
       if (spec.widgetToolGroup) button.dataset.widgetToolGroup = spec.widgetToolGroup;
       else delete button.dataset.widgetToolGroup;
       button.setAttribute("aria-label", label);
-      button.title = spec.kind === "refine" ? t("widgetRefineHint") : label;
-      if (["copy", "refine"].includes(spec.kind)) button.querySelector("span").textContent = label;
+      if (spec.kind === "refine") button.removeAttribute("title");
+      else button.title = label;
+      if (["copy", "refine"].includes(spec.kind)) button.querySelector(".object-chrome-label").textContent = label;
+      if (spec.kind === "refine") {
+        const hint = button.querySelector(".widget-refine-hint"),
+          visible = widgetRefineHintVisible(spec.refineCandidate),
+          hintWidth = Math.min(320, Math.max(120, view.clientWidth - 24)),
+          hintLeft = Math.max(12, Math.min(Math.max(12, view.clientWidth - hintWidth - 12), position.x)) - position.x;
+        hint.textContent = t(spec.refineCandidate?.hintKey || "widgetRefineHint");
+        hint.hidden = !visible;
+        declaration?.setProperty("--refine-hint-left", `${hintLeft.toFixed(1)}px`);
+      }
       declaration?.setProperty("--object-control-x", `${position.x.toFixed(1)}px`);
       declaration?.setProperty("--object-control-y", `${position.y.toFixed(1)}px`);
       declaration?.setProperty("--object-control-scale", String(position.scale || 1));
@@ -2428,16 +3424,27 @@
     }
     for (const [key, button] of objectChromeButtons) {
       if (active.has(key)) continue;
+      if (button.penechoSpec?.kind === "refine"
+        && state.widgetRefineButtonHoverId === button.penechoSpec.refineCandidate?.widgetId) {
+        state.widgetRefineButtonHoverId = null;
+        removedHoveredRefineButton = true;
+      }
       removeObjectChromeStyleRule(button);
       button.remove();
       objectChromeButtons.delete(key);
     }
+    if (removedHoveredRefineButton) requestInteractionLayerRender();
+    syncWidgetRefineConfirmation();
   }
   objectChromeLayer?.addEventListener("pointermove", (event) => {
+    if (finishReleasedWidgetGesture(event)) return;
+    const overChromeControl = event.target?.closest?.(".object-chrome-button, .widget-refine-confirmation");
+    if (event.pointerType !== "touch" && !overChromeControl) updateWidgetRefinePointer(clientPoint(event));
     if (state.pendingGesture?.id === event.pointerId) updatePendingGesture(event);
     else if (state.widgetGesture?.id === event.pointerId) updateWidgetGesture(event);
     else if (state.imageGesture?.id === event.pointerId) updateImageGesture(event);
     else if (state.animationGesture?.id === event.pointerId) updateAnimationGesture(event);
+    else if (state.textBoxGesture?.id === event.pointerId) updateTextBoxChromeGesture(event);
   });
   objectChromeLayer?.addEventListener("pointerup", finishObjectChromeGesture);
   objectChromeLayer?.addEventListener("pointercancel", finishObjectChromeGesture);
@@ -2469,7 +3476,11 @@
     if (state.drawing?.preview) drawPreview(state.drawing.preview, interactionCtx);
     drawPointerPreview(interactionCtx);
     if (state.selection) drawSelection(state.selection, interactionCtx);
-    drawHandModeOutlines(interactionCtx);
+    drawDirtyMaskDebugBounds(interactionCtx);
+    drawWidgetRefineButtonHoverOutline(interactionCtx);
+    drawWidgetRefineClickPulse(interactionCtx);
+    drawWidgetRefineConfirmation(interactionCtx);
+    drawHandObjectToolbarOutlines(interactionCtx);
     drawSelectedAnimation(interactionCtx);
     if (state.pending) {
       interactionCtx.save();
@@ -2495,20 +3506,203 @@
     state.textInputBlockedUntil = Math.max(state.textInputBlockedUntil, Date.now() + duration);
     resetCanvasCursor();
   }
+  function unionDirtyBounds(current, next) {
+    if (!current) return next ? { ...next } : null;
+    if (!next) return { ...current };
+    const x = Math.min(current.x, next.x),
+      y = Math.min(current.y, next.y),
+      right = Math.max(current.x + current.w, next.x + next.w),
+      bottom = Math.max(current.y + current.h, next.y + next.h);
+    return { x, y, w:right - x, h:bottom - y };
+  }
+  function dirtyInkDebugBounds() {
+    let bounds = null;
+    for (const [k, local] of state.dirtyInkBounds) {
+      if (!local) continue;
+      const [tx, ty] = k.split(",").map(Number);
+      bounds = unionDirtyBounds(bounds, {
+        x:tx * TILE + local.x / DIRTY_MASK_SCALE,
+        y:ty * TILE + local.y / DIRTY_MASK_SCALE,
+        w:local.w / DIRTY_MASK_SCALE,
+        h:local.h / DIRTY_MASK_SCALE,
+      });
+    }
+    return bounds;
+  }
+  function dirtyObjectDebugBounds(ids, items, boxForItem) {
+    let bounds = null;
+    for (const id of ids) {
+      const item = items.find((candidate) => candidate.id === id);
+      if (item) bounds = unionDirtyBounds(bounds, boxForItem(item));
+    }
+    return bounds;
+  }
+  function drawDirtyMaskDebugBounds(context) {
+    if (!SHOW_DIRTY_MASK_DEBUG_BOUNDS) return;
+    const boxes = [
+      dirtyInkDebugBounds(),
+      dirtyObjectDebugBounds(state.dirtyImageIds, state.images, imageBox),
+      dirtyObjectDebugBounds(state.dirtyTextBoxIds, state.textBoxes, textBoxBox),
+    ].filter(Boolean);
+    if (!boxes.length) return;
+    const unit = 1 / state.scale,
+      margin = 3 * unit;
+    context.save();
+    context.strokeStyle = "rgba(107, 114, 128, 0.62)";
+    context.lineWidth = unit;
+    context.lineCap = "round";
+    context.setLineDash([unit, 4 * unit]);
+    for (const box of boxes) context.strokeRect(box.x - margin, box.y - margin, box.w + margin * 2, box.h + margin * 2);
+    context.restore();
+  }
   function mergeDirtyBox(box) {
     if (!box) return;
-    if (!state.dirty) {
-      state.dirty = { ...box };
-      return;
+    state.dirty = unionDirtyBounds(state.dirty, box);
+  }
+  function dirtyMaskTile(tx, ty, create = true) {
+    const k = key(tx, ty);
+    if (!state.dirtyInkTiles.has(k) && create) {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = Math.ceil(TILE * DIRTY_MASK_SCALE);
+      canvas.getContext("2d", { willReadFrequently:true });
+      state.dirtyInkTiles.set(k, canvas);
+      state.dirtyInkBounds.set(k, null);
     }
-    const right = Math.max(state.dirty.x + state.dirty.w, box.x + box.w),
-      bottom = Math.max(state.dirty.y + state.dirty.h, box.y + box.h);
-    state.dirty = {
-      x: Math.min(state.dirty.x, box.x),
-      y: Math.min(state.dirty.y, box.y),
-      w: right - Math.min(state.dirty.x, box.x),
-      h: bottom - Math.min(state.dirty.y, box.y),
-    };
+    return state.dirtyInkTiles.get(k) || null;
+  }
+  function dirtyMaskLocalBox(tx, ty, box) {
+    const left = Math.max(0, (box.x - tx * TILE) * DIRTY_MASK_SCALE),
+      top = Math.max(0, (box.y - ty * TILE) * DIRTY_MASK_SCALE),
+      right = Math.min(TILE * DIRTY_MASK_SCALE, (box.x + box.w - tx * TILE) * DIRTY_MASK_SCALE),
+      bottom = Math.min(TILE * DIRTY_MASK_SCALE, (box.y + box.h - ty * TILE) * DIRTY_MASK_SCALE);
+    return right > left && bottom > top ? { x:left, y:top, w:right - left, h:bottom - top } : null;
+  }
+  function trackDirtyStrokeSegment(tx, ty, a, b, erase, size, box) {
+    const canvas = dirtyMaskTile(tx, ty, !erase);
+    if (!canvas) return;
+    const context = canvas.getContext("2d", { willReadFrequently:true });
+    context.save();
+    context.globalCompositeOperation = erase ? "destination-out" : "source-over";
+    context.strokeStyle = "#000";
+    context.lineWidth = Math.max(1, size * DIRTY_MASK_SCALE);
+    context.lineCap = context.lineJoin = "round";
+    context.beginPath();
+    context.moveTo((a.x - tx * TILE) * DIRTY_MASK_SCALE, (a.y - ty * TILE) * DIRTY_MASK_SCALE);
+    context.lineTo((b.x - tx * TILE) * DIRTY_MASK_SCALE, (b.y - ty * TILE) * DIRTY_MASK_SCALE);
+    context.stroke();
+    context.restore();
+    const k = key(tx, ty);
+    if (erase) {
+      state.dirtyInkBounds.delete(k);
+      state.drawing?.dirtyMaskTouched?.add(k);
+    }
+    else state.dirtyInkBounds.set(k, unionDirtyBounds(state.dirtyInkBounds.get(k), dirtyMaskLocalBox(tx, ty, box)));
+  }
+  function trackMergedImageAsDirty(item, box) {
+    const x0 = Math.max(0, Math.floor(box.x / TILE)),
+      y0 = Math.max(0, Math.floor(box.y / TILE)),
+      x1 = Math.min(Math.ceil(SIZE / TILE) - 1, Math.ceil((box.x + box.w) / TILE) - 1),
+      y1 = Math.min(Math.ceil(SIZE / TILE) - 1, Math.ceil((box.y + box.h) / TILE) - 1);
+    for (let ty = y0; ty <= y1; ty++)
+      for (let tx = x0; tx <= x1; tx++) {
+        const canvas = dirtyMaskTile(tx, ty),
+          context = canvas.getContext("2d", { willReadFrequently:true });
+        context.drawImage(
+          item.image,
+          (item.x - tx * TILE) * DIRTY_MASK_SCALE,
+          (item.y - ty * TILE) * DIRTY_MASK_SCALE,
+          item.w * DIRTY_MASK_SCALE,
+          item.h * DIRTY_MASK_SCALE,
+        );
+        const k = key(tx, ty);
+        state.dirtyInkBounds.set(k, unionDirtyBounds(state.dirtyInkBounds.get(k), dirtyMaskLocalBox(tx, ty, box)));
+      }
+  }
+  function dirtyMaskAlphaBounds(canvas) {
+    const { width, height } = canvas;
+    if (!width || !height) return null;
+    const data = canvas.getContext("2d", { willReadFrequently:true }).getImageData(0, 0, width, height).data;
+    let left = width, top = height, right = -1, bottom = -1;
+    for (let y = 0; y < height; y++)
+      for (let x = 0; x < width; x++) {
+        if (!data[(y * width + x) * 4 + 3]) continue;
+        left = Math.min(left, x);
+        top = Math.min(top, y);
+        right = Math.max(right, x);
+        bottom = Math.max(bottom, y);
+      }
+    return right < 0 ? null : { x:left, y:top, w:right - left + 1, h:bottom - top + 1 };
+  }
+  function recomputeDirtyBounds() {
+    let next = null;
+    for (const [k, canvas] of [...state.dirtyInkTiles]) {
+      let local = state.dirtyInkBounds.get(k);
+      if (!state.dirtyInkBounds.has(k)) {
+        local = dirtyMaskAlphaBounds(canvas);
+        state.dirtyInkBounds.set(k, local);
+      }
+      if (!local) {
+        state.dirtyInkTiles.delete(k);
+        state.dirtyInkBounds.delete(k);
+        continue;
+      }
+      const [tx, ty] = k.split(",").map(Number);
+      next = unionDirtyBounds(next, {
+        x:tx * TILE + local.x / DIRTY_MASK_SCALE,
+        y:ty * TILE + local.y / DIRTY_MASK_SCALE,
+        w:local.w / DIRTY_MASK_SCALE,
+        h:local.h / DIRTY_MASK_SCALE,
+      });
+    }
+    for (const id of [...state.dirtyImageIds]) {
+      const item = state.images.find((candidate) => candidate.id === id);
+      if (item) next = unionDirtyBounds(next, imageBox(item));
+      else state.dirtyImageIds.delete(id);
+    }
+    for (const id of [...state.dirtyTextBoxIds]) {
+      const item = state.textBoxes.find((candidate) => candidate.id === id);
+      if (item) next = unionDirtyBounds(next, textBoxBox(item));
+      else state.dirtyTextBoxIds.delete(id);
+    }
+    state.dirty = next;
+    if (!next) state.autoEligible = false;
+    return next;
+  }
+  function clearDirtyContributionTracking() {
+    state.dirtyInkTiles.clear();
+    state.dirtyInkBounds.clear();
+    state.dirtyImageIds.clear();
+    state.dirtyTextBoxIds.clear();
+  }
+  function filterErasedDirtyHotspots(touchedTiles) {
+    const pixels = new Map();
+    state.hotspotTrail = state.hotspotTrail.filter((point) => {
+      const tx = Math.floor(point.x / TILE),
+        ty = Math.floor(point.y / TILE),
+        k = key(tx, ty),
+        canvas = state.dirtyInkTiles.get(k);
+      if (touchedTiles && !touchedTiles.has(k)) return true;
+      if (!canvas) return false;
+      if (!pixels.has(k)) pixels.set(k, canvas.getContext("2d", { willReadFrequently:true }).getImageData(0, 0, canvas.width, canvas.height));
+      const image = pixels.get(k),
+        x = Math.max(0, Math.min(image.width - 1, Math.floor((point.x - tx * TILE) * DIRTY_MASK_SCALE))),
+        y = Math.max(0, Math.min(image.height - 1, Math.floor((point.y - ty * TILE) * DIRTY_MASK_SCALE)));
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dx = -1; dx <= 1; dx++) {
+          const px = x + dx, py = y + dy;
+          if (px >= 0 && py >= 0 && px < image.width && py < image.height && image.data[(py * image.width + px) * 4 + 3]) return true;
+        }
+      return false;
+    });
+  }
+  function reconcileDirtyAfterTextBoxDeletion(deletedTextBox) {
+    const deletedBox = textBoxBox(deletedTextBox);
+    const latestTypedBox = state.latestTypedInput?.box,
+      deletedLatestTypedInput = latestTypedBox
+        && ["x", "y", "w", "h"].every((key) => Math.abs(latestTypedBox[key] - deletedBox[key]) < .001);
+    if (deletedLatestTypedInput) state.latestTypedInput = null;
+    state.dirtyTextBoxIds.delete(deletedTextBox.id);
+    recomputeDirtyBounds();
   }
   function textEditorScreenPoint(editor) {
     return { left: editor.x * state.scale + state.panX, top: editor.y * state.scale + state.panY };
@@ -2866,11 +4060,11 @@
       if (existingIndex >= 0) state.textBoxes.splice(existingIndex, 1, item);
       else state.textBoxes.push(item);
       state.userRevision++;
-      mergeDirtyBox(box);
+      state.dirtyTextBoxIds.add(item.id);
+      recomputeDirtyBounds();
       state.latestTypedInput = { text: text.slice(0, TEXT_INPUT_MAX_LENGTH), box };
-      state.hotspotTrail.push({ x: x + width / 2, y: y + height / 2 });
-      if (state.hotspotTrail.length > 512) state.hotspotTrail.splice(0, state.hotspotTrail.length - 512);
       state.autoEligible = true;
+      const refineCandidate = latchWidgetRefineCandidate(item, "text-box");
       state.selectedTextBoxId = null;
       removeTextEditor(editor);
       blockCanvasInput(TEXT_INPUT_GUARD_MS);
@@ -2878,7 +4072,8 @@
       save();
       render();
       setStatusKey(mixedFallback ? "textMixedModeError" : "ready");
-      if (state.auto) schedule(Math.max(1000, state.autoDelayMs));
+      if (state.auto && !refineCandidate) schedule(Math.max(1000, state.autoDelayMs));
+      if (refineCandidate) setStatusKey("widgetRefinePending");
     })();
     editor.commitPromise = commitPromise;
     try {
@@ -2915,7 +4110,7 @@
     else setCanvasMode("pen");
     if (deletedTextBox) {
       state.userRevision++;
-      mergeDirtyBox(textBoxBox(deletedTextBox));
+      reconcileDirtyAfterTextBoxDeletion(deletedTextBox);
       save();
     }
     render();
@@ -3032,6 +4227,10 @@
     root.addEventListener("pointerup", (event) => finishTextEditorGesture(event, editor));
     root.addEventListener("pointercancel", (event) => finishTextEditorGesture(event, editor));
     textarea.addEventListener("focus", () => focusTextEditor(editor));
+    textarea.addEventListener("input", () => {
+      hideWidgetRefineHint();
+      if (editor.mixedMode) scheduleTextEditorPreview(editor);
+    });
     textarea.addEventListener("keydown", (event) => {
       if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.isComposing) {
         event.preventDefault();
@@ -3077,6 +4276,7 @@
   }
   function editTextBox(item) {
     if (state.mode !== "hand" || !item || !state.textBoxes.includes(item) || state.textEditors.size) return false;
+    clearHandToolbarTarget("text-box", item.id);
     if (state.widgetEdit) acceptWidgetEdit();
     if (state.imageEdit) acceptImageEdit({ restoreMode:false });
     if (state.animationEdit) acceptAnimationEdit();
@@ -3115,7 +4315,7 @@
     setCanvasCursor(state.mode === "hand" ? "grab" : state.mode === "pen" ? "pen" : state.mode === "eraser" ? "eraser" : "crosshair");
   }
   function beginTouchGesture() {
-    if (state.touches.size < 2) return;
+    if (state.navigationLocked || state.touches.size < 2) return;
     const ids = [...state.touches.keys()].slice(0, 2),
       points = ids.map((id) => state.touches.get(id));
     state.touchGesture = {
@@ -3134,6 +4334,10 @@
   function updateTouchGesture() {
     const g = state.touchGesture;
     if (!g) return false;
+    if (state.navigationLocked) {
+      setNavigating(true);
+      return false;
+    }
     const points = g.ids.map((id) => state.touches.get(id));
     if (points.some((p) => !p)) return false;
     const center = {
@@ -3154,12 +4358,21 @@
     return true;
   }
   function moveCanvas(dx, dy) {
+    if (state.navigationLocked) {
+      setNavigating(true);
+      return false;
+    }
     state.panX += dx;
     state.panY += dy;
     updateCoordinates();
     requestRender();
+    return true;
   }
   function zoomCanvasAt(clientX, clientY, deltaY) {
+    if (state.navigationLocked) {
+      setNavigating(true);
+      return false;
+    }
     const rect = view.getBoundingClientRect(),
       factor = deltaY < 0 ? 1.12 : 0.89,
       next = Math.max(0.03, Math.min(2, state.scale * factor)),
@@ -3171,6 +4384,7 @@
     updateCoordinates();
     requestRender();
     wheelNavigating();
+    return true;
   }
   function valid(p) {
     return p.x >= 0 && p.x <= SIZE && p.y >= 0 && p.y <= SIZE;
@@ -3193,30 +4407,21 @@
     }
   }
   function restoreDirty(box) {
-    if (!box) return;
-    if (!state.dirty) {
-      state.dirty = box;
-      return;
+    if (state.dirtyInkTiles.size || state.dirtyImageIds.size || state.dirtyTextBoxIds.size) {
+      const tracked = recomputeDirtyBounds();
+      if (tracked) return;
     }
-    const x = Math.min(box.x, state.dirty.x),
-      y = Math.min(box.y, state.dirty.y),
-      right = Math.max(box.x + box.w, state.dirty.x + state.dirty.w),
-      bottom = Math.max(box.y + box.h, state.dirty.y + state.dirty.h);
-    state.dirty = { x, y, w: right - x, h: bottom - y };
-  }
-  function discardUncapturableInput(hotspotCount, usedDirty) {
-    if (hotspotCount) state.hotspotTrail.splice(0, hotspotCount);
-    state.dirty = null;
-    state.autoEligible = false;
-    if (!usedDirty) state.lastUserBox = null;
+    if (!box) return;
+    mergeDirtyBox(box);
   }
   function invalidateRecognition() {
-    const active=state.activeAI;
-    if(active&&!active.superseded){active.superseded=true;active.dirtyRestored=true;active.controller.abort();if(state.activeAI===active){state.activeAI=null;setBusy(false)}}
+    supersedeActiveAI("recognition-invalidated");
     clearTimeout(state.timer);
     state.timer = 0;
+    clearWidgetRefineCandidate();
     state.recognitionGeneration++;
     state.hotspotTrail = [];
+    clearDirtyContributionTracking();
     state.dirty = null;
     state.autoEligible = false;
     state.lastUserBox = null;

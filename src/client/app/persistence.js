@@ -2,12 +2,38 @@
   const SNAPSHOT_DB = "penecho-canvas-history",
     SNAPSHOT_STORE = "snapshots",
     SNAPSHOT_TILE_STORE = "snapshot-tiles",
-    SNAPSHOT_LOCATIONS = new Set(["device", "server"]);
+    SNAPSHOT_TILE_DECODE_BATCH_SIZE = 8,
+    SNAPSHOT_LOCATIONS = new Set(["device", "server"]),
+    SERVER_DEFAULT_PROJECT_ID = "uncategorized",
+    SERVER_ALL_PROJECTS_ID = "all",
+    SERVER_PROJECT_SESSION_KEY = "penecho-selected-canvas-project";
   let snapshotDbPromise = null,
     snapshotItems = [],
     snapshotSaveInProgress = false,
     snapshotListGeneration = 0,
-    historyNoticeTimer = 0;
+    historyNoticeTimer = 0,
+    serverCanvasProjects = [],
+    selectedServerProjectId = storedServerProjectId(),
+    pendingCanvasTransition = null;
+  function validServerProjectSelection(projectId) {
+    return projectId === SERVER_DEFAULT_PROJECT_ID || projectId === SERVER_ALL_PROJECTS_ID || /^project-[a-zA-Z0-9-]{8,64}$/.test(projectId || "");
+  }
+  function storedServerProjectId() {
+    try {
+      const projectId = sessionStorage.getItem(SERVER_PROJECT_SESSION_KEY);
+      return validServerProjectSelection(projectId) ? projectId : SERVER_DEFAULT_PROJECT_ID;
+    } catch {
+      return SERVER_DEFAULT_PROJECT_ID;
+    }
+  }
+  function rememberSelectedServerProject(projectId) {
+    selectedServerProjectId = validServerProjectSelection(projectId) ? projectId : SERVER_DEFAULT_PROJECT_ID;
+    try { sessionStorage.setItem(SERVER_PROJECT_SESSION_KEY, selectedServerProjectId); } catch {}
+    return selectedServerProjectId;
+  }
+  function selectedServerSaveProjectId() {
+    return selectedServerProjectId === SERVER_ALL_PROJECTS_ID ? SERVER_DEFAULT_PROJECT_ID : selectedServerProjectId;
+  }
   function snapshotLocationLabel(location = state.snapshotLocation) {
     return t(location === "server" ? "storagePenEchoServer" : "storageThisDevice");
   }
@@ -21,6 +47,7 @@
       const description = document.querySelector(`#${id}`);
       if (description) description.textContent = t(descriptionKey);
     }
+    renderServerProjectUi();
   }
   function setSnapshotLocation(location) {
     if (!SNAPSHOT_LOCATIONS.has(location) || state.snapshotLocation === location) {
@@ -84,6 +111,8 @@
       saveButton.setAttribute("aria-busy", String(busy));
     }
     document.querySelectorAll('input[name="historyStorageLocation"]').forEach((input) => (input.disabled = busy));
+    document.querySelectorAll("#serverProjectManager button, #serverProjectManager select").forEach((control) => (control.disabled = busy));
+    if (!busy) renderServerProjectUi();
   }
   async function saveSnapshotFromHistory() {
     if (snapshotSaveInProgress) return;
@@ -157,7 +186,7 @@
   async function allSnapshots() {
     const db = await snapshotDb(),
       items = await requestResult(db.transaction(SNAPSHOT_STORE, "readonly").objectStore(SNAPSHOT_STORE).getAll());
-    return items.sort((a, b) => b.createdAt - a.createdAt);
+    return items.sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt));
   }
   function blobDataUrl(blob) {
     return new Promise((resolve, reject) => {
@@ -179,7 +208,7 @@
   }
   async function snapshotPreviewBlob() {
     try {
-      return await canvasBlob(snapshotPreview());
+      return await canvasBlob(snapshotPreview(), "image/webp", .78);
     } catch (error) {
       console.warn("PenEcho snapshot thumbnail failed; saving with a fallback thumbnail:", error);
       return dataUrlBlob("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
@@ -192,16 +221,19 @@
     return body;
   }
   async function serverSnapshotItems() {
-    const response = await fetch("/api/canvases", {
-        credentials:"same-origin",
-        cache:"no-store",
-        headers:authenticatedApiHeaders(),
-      }),
-      body = await snapshotApiResponse(response);
+    const [canvasResponse, projectResponse] = await Promise.all([
+        fetch("/api/canvases", { credentials:"same-origin", cache:"no-store", headers:authenticatedApiHeaders() }),
+        fetch("/api/canvas-projects", { credentials:"same-origin", cache:"no-store", headers:authenticatedApiHeaders() }),
+      ]),
+      body = await snapshotApiResponse(canvasResponse),
+      projectBody = projectResponse.ok ? await snapshotApiResponse(projectResponse) : null;
+    serverCanvasProjects = Array.isArray(projectBody?.projects) ? projectBody.projects : [{ id:SERVER_DEFAULT_PROJECT_ID, name:"Uncategorized", system:true }];
+    if (!serverCanvasProjects.some((project) => project.id === selectedServerProjectId) && selectedServerProjectId !== SERVER_ALL_PROJECTS_ID) rememberSelectedServerProject(SERVER_DEFAULT_PROJECT_ID);
     return Promise.all((Array.isArray(body?.canvases) ? body.canvases : []).map(async (item) => ({
       ...item,
+      projectId:item.projectId || SERVER_DEFAULT_PROJECT_ID,
       preview:dataUrlBlob(item.preview),
-    })));
+    }))).then((items) => items.sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt)));
   }
   async function snapshotsAt(location) {
     return location === "server" ? serverSnapshotItems() : allSnapshots();
@@ -217,7 +249,7 @@
     return bounds;
   }
   function snapshotPreview() {
-    const preview = offscreen(180, 120),
+    const preview = offscreen(640, 426),
       q = preview.getContext("2d"),
       bounds = unionLocalBounds(unionLocalBounds(unionLocalBounds(unionLocalBounds(visibleInkBounds({ x:0, y:0, w:SIZE, h:SIZE }), imageBounds()), textBoxBounds()), animationBounds()), widgetBounds());
     q.fillStyle = state.paint.paper;
@@ -230,6 +262,8 @@
     const captureTime = performance.now();
     q.save();
     q.setTransform(scale, 0, 0, scale, dx - bounds.x * scale, dy - bounds.y * scale);
+    drawAnimationsToContext(q, bounds, captureTime);
+    drawWidgetsToContext(q, bounds);
     drawImagesToContext(q, bounds);
     drawTextBoxesToContext(q, bounds);
     q.restore();
@@ -243,8 +277,6 @@
     q.save();
     q.setTransform(scale, 0, 0, scale, dx - bounds.x * scale, dy - bounds.y * scale);
     drawSharpOverlays(q, bounds);
-    drawAnimationsToContext(q, bounds, captureTime);
-    drawWidgetsToContext(q, bounds);
     q.restore();
     return preview;
   }
@@ -279,9 +311,9 @@
     return { x, y, w: right - x, h: bottom - y };
   }
   async function renderExportCanvas() {
-    await snapshotVisibleWidgets();
     const region = exportRegion();
     if (!region) return null;
+    await prepareVisibleWidgetSnapshots(null, false);
     const scale = Math.min(1, EXPORT_MAX_DIMENSION / region.w, EXPORT_MAX_DIMENSION / region.h, Math.sqrt(EXPORT_MAX_PIXELS / (region.w * region.h))),
       canvas = offscreen(Math.max(1, Math.ceil(region.w * scale)), Math.max(1, Math.ceil(region.h * scale))),
       context = canvas.getContext("2d");
@@ -306,6 +338,8 @@
       }
       context.stroke();
     }
+    drawAnimationsToContext(context, region, captureTime);
+    drawWidgetsToContext(context, region);
     drawImagesToContext(context, region);
     drawTextBoxesToContext(context, region);
     for (const [tileKey, tileCanvas] of tiles) {
@@ -315,8 +349,6 @@
       if (intersection({ x, y, w: TILE, h: TILE }, region)) context.drawImage(tileCanvas, x, y);
     }
     drawSharpOverlays(context, region);
-    drawAnimationsToContext(context, region, captureTime);
-    drawWidgetsToContext(context, region);
     const selection = state.selection;
     if (selection?.phase === "active")
       for (const fragment of selection.fragments) {
@@ -374,6 +406,50 @@
       image.src = url;
     });
   }
+  function releaseSnapshotTileCanvases(canvases) {
+    for (const canvas of canvases.values()) canvas.width = canvas.height = 1;
+    canvases.clear();
+  }
+  function waitForSnapshotTileFrame() {
+    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  }
+  async function decodeSnapshotTilesInBatches(tileEntries, isCurrent) {
+    const decodedTiles = new Map();
+    try {
+      for (let start = 0; start < tileEntries.length; start += SNAPSHOT_TILE_DECODE_BATCH_SIZE) {
+        const end = Math.min(tileEntries.length, start + SNAPSHOT_TILE_DECODE_BATCH_SIZE),
+          batch = await Promise.all(tileEntries.slice(start, end).map(async ({ k, blob }) => ({ k, image:await imageFromBlob(blob) })));
+        if (!isCurrent()) {
+          batch.length = 0;
+          releaseSnapshotTileCanvases(decodedTiles);
+          return null;
+        }
+        for (const { k, image } of batch) {
+          const canvas = offscreen(TILE, TILE),
+            context = canvas.getContext("2d");
+          if (!context) throw Error("Could not restore snapshot tile");
+          context.drawImage(image, 0, 0);
+          const previous = decodedTiles.get(k);
+          if (previous) previous.width = previous.height = 1;
+          decodedTiles.set(k, canvas);
+        }
+        // Drop this batch's decoded image references before yielding. The tile
+        // canvases retain the pixels needed for the atomic swap below.
+        batch.length = 0;
+        if (end < tileEntries.length) {
+          await waitForSnapshotTileFrame();
+          if (!isCurrent()) {
+            releaseSnapshotTileCanvases(decodedTiles);
+            return null;
+          }
+        }
+      }
+      return decodedTiles;
+    } catch (error) {
+      releaseSnapshotTileCanvases(decodedTiles);
+      throw error;
+    }
+  }
   async function finalizeCanvasForSnapshot() {
     if (state.pendingWidget) acceptPendingWidget({ restoreMode:false });
     if (state.pending) acceptPending({ restoreMode:false });
@@ -395,25 +471,47 @@
     tileEntries.forEach(({ k, blob }) => tileStore.put({ id:`${item.id}:${k}`, snapshotId:item.id, k, blob }));
     await transactionDone(transaction);
   }
+  async function snapshotBundleAsset(kind, blob, metadata = {}) {
+    const encoded = await blobDataUrl(blob),
+      match = /^data:([^;,]+);base64,([A-Za-z0-9+/]+={0,2})$/.exec(encoded);
+    if (!match) throw Error("Could not encode canvas bundle asset");
+    return { kind, contentType:match[1], metadata, dataBase64:match[2] };
+  }
+  function snapshotBundleAssetBlob(asset) {
+    if (!asset || typeof asset.contentType !== "string" || typeof asset.dataBase64 !== "string") throw Error("Canvas bundle contains an invalid asset");
+    return dataUrlBlob(`data:${asset.contentType};base64,${asset.dataBase64}`);
+  }
   async function serverSnapshotPayload(item, tileEntries) {
-    const [preview, serverTiles, serverImages] = await Promise.all([
-      blobDataUrl(item.preview),
-      Promise.all(tileEntries.map(async ({ k, blob }) => ({ k, data:await blobDataUrl(blob) }))),
-      Promise.all(item.images.map(async ({ blob, ...image }) => ({ ...image, data:await blobDataUrl(blob) }))),
+    const [previewAsset, tileAssets, imageAssets, widgetAssets] = await Promise.all([
+      snapshotBundleAsset("preview", item.preview, { width:640, height:426 }),
+      Promise.all(tileEntries.map(({ k, blob }) => snapshotBundleAsset("tile", blob, { tileKey:k }))),
+      Promise.all(item.images.map(({ blob, ...image }) => snapshotBundleAsset("resource", blob, { resourceId:image.id, resourceType:"image", ...image }))),
+      Promise.all(item.widgets.map((widget) => snapshotBundleAsset("widget", new Blob([JSON.stringify(widget)], { type:"application/json" }), { widgetId:widget.id, ...(widget.pluginId ? { pluginId:widget.pluginId } : {}) }))),
     ]);
     return {
-      version:1,
+      version:2,
+      bundleVersion:2,
+      mode:"snapshot",
+      formatVersion:1,
+      extensions:{},
       id:item.id,
       createdAt:item.createdAt,
+      updatedAt:item.updatedAt,
       name:item.name,
-      theme:item.theme,
-      view:item.view,
-      animations:item.animations,
-      widgets:item.widgets,
-      textBoxes:item.textBoxes,
-      images:serverImages,
-      tiles:serverTiles,
-      preview,
+      projectId:item.projectId || SERVER_DEFAULT_PROJECT_ID,
+      manifest:{
+        format:"penecho-raster-tiles",
+        formatVersion:1,
+        canvasSize:{ width:SIZE, height:SIZE },
+        tileSize:TILE,
+        theme:item.theme,
+        view:item.view,
+        animations:item.animations,
+        textBoxes:item.textBoxes,
+        savedAt:new Date(item.updatedAt).toISOString(),
+        extensions:{},
+      },
+      assets:[...tileAssets, ...widgetAssets, ...imageAssets, previewAsset],
     };
   }
   async function saveServerSnapshot(item, tileEntries, overwriteId) {
@@ -437,11 +535,13 @@
       setStatusKey("emptyCanvas");
       return null;
     }
-    await snapshotVisibleWidgets({ bestEffort:true });
+    await prepareVisibleWidgetSnapshots(null, false);
     const nameInput = document.querySelector("#historyName"),
       existing = overwriteId ? snapshotItems.find((item) => item.id === overwriteId) : null,
       id = overwriteId || `${Date.now()}-${crypto.randomUUID?.() || Math.random().toString(36).slice(2)}`,
-      createdAt = Date.now(),
+      now = Date.now(),
+      createdAt = overwriteId ? existing?.createdAt || now : now,
+      updatedAt = now,
       animations = serializedAnimations(),
       widgets = serializedWidgets(),
       textBoxes = storedTextBoxes(),
@@ -450,11 +550,18 @@
       preview = await snapshotPreviewBlob(),
       requestedName = String(name === null ? nameInput.value : name).trim().slice(0, 48),
       item = {
+        version:2,
         id,
         createdAt,
+        updatedAt,
         name: requestedName || (overwriteId ? (existing ? existing.name : state.currentSnapshotName) : ""),
+        projectId:location === "server"
+          ? overwriteId
+            ? existing?.projectId || state.currentSnapshotProjectId || SERVER_DEFAULT_PROJECT_ID
+            : selectedServerSaveProjectId()
+          : null,
         theme: state.theme,
-        view: { scale: state.scale, panX: state.panX, panY: state.panY },
+        view: { scale: state.scale, panX: state.panX, panY: state.panY, navigationLocked:state.navigationLocked },
         tileCount: tileEntries.length,
         animationCount: animations.length,
         animations,
@@ -473,6 +580,8 @@
     state.currentSnapshotId = id;
     state.currentSnapshotName = snapshotName(item);
     state.currentSnapshotLocation = location;
+    state.currentSnapshotProjectId = item.projectId;
+    state.snapshotSavedRevision = state.userRevision;
     await refreshSnapshots();
     setStatusKey(overwriteId ? "snapshotOverwritten" : "snapshotSaved");
     return id;
@@ -493,10 +602,51 @@
       }),
       body = await snapshotApiResponse(response),
       stored = body?.canvas;
-    if (!stored || !Array.isArray(stored.tiles) || !Array.isArray(stored.images)) throw Error("PenEcho server returned an invalid canvas");
+    if (!stored) throw Error("PenEcho server returned an invalid canvas");
+    const storedVersion = stored.version ?? stored.bundleVersion ?? 1;
+    if (storedVersion === 2) {
+      if (stored.bundleVersion !== 2 || stored.mode !== "snapshot" || stored.formatVersion !== 1 || stored.manifest?.format !== "penecho-raster-tiles" || stored.manifest?.formatVersion !== 1 || !Array.isArray(stored.assets)) throw Error("PenEcho server returned an invalid canvas bundle");
+      const previewAsset = stored.assets.find((asset) => asset.kind === "preview"),
+        tileAssets = stored.assets.filter((asset) => asset.kind === "tile"),
+        imageAssets = stored.assets.filter((asset) => asset.kind === "resource" && asset.metadata?.resourceType === "image"),
+        widgetAssets = stored.assets.filter((asset) => asset.kind === "widget"),
+        widgets = await Promise.all(widgetAssets.map(async (asset) => {
+          const widget = JSON.parse(await snapshotBundleAssetBlob(asset).text());
+          if (!widget?.id || widget.id !== asset.metadata?.widgetId) throw Error("Canvas bundle contains an invalid widget");
+          return widget;
+        })),
+        imageById = new Map(imageAssets.map((asset) => [asset.metadata.resourceId, {
+          ...asset.metadata,
+          id:asset.metadata.resourceId,
+          blob:snapshotBundleAssetBlob(asset),
+        }]));
+      if (!previewAsset) throw Error("Canvas bundle has no preview");
+      return {
+        item:{
+          version:2,
+          id:stored.id,
+          createdAt:stored.createdAt,
+          updatedAt:stored.updatedAt || stored.createdAt,
+          name:stored.name || "",
+          theme:stored.manifest.theme,
+          view:stored.manifest.view,
+          animations:stored.manifest.animations || [],
+          textBoxes:stored.manifest.textBoxes || [],
+          projectId:stored.projectId || SERVER_DEFAULT_PROJECT_ID,
+          preview:snapshotBundleAssetBlob(previewAsset),
+          widgets,
+          images:[...imageById.values()],
+        },
+        tileEntries:tileAssets.map((asset) => ({ k:asset.metadata?.tileKey, blob:snapshotBundleAssetBlob(asset) })),
+      };
+    }
+    if (!Array.isArray(stored.tiles) || !Array.isArray(stored.images)) throw Error("PenEcho server returned an invalid canvas");
     return {
       item:{
         ...stored,
+        version:1,
+        updatedAt:stored.updatedAt || stored.createdAt,
+        projectId:stored.projectId || SERVER_DEFAULT_PROJECT_ID,
         preview:dataUrlBlob(stored.preview),
         images:stored.images.map(({ data, ...image }) => ({ ...image, blob:dataUrlBlob(data) })),
       },
@@ -517,17 +667,23 @@
       stored = await readSnapshot(location, id);
     if (!stored) return;
     const { item, tileEntries } = stored;
-    const [decoded, images] = await Promise.all([
-      Promise.all(tileEntries.map(async ({ k, blob }) => ({ k, image: await imageFromBlob(blob) }))),
+    const loadIsCurrent = () => loadGeneration===state.snapshotLoadGeneration && state.userRevision===expectedRevision;
+    if (!loadIsCurrent()) return;
+    await enableSnapshotWidgetPlugins(item.widgets);
+    if (!loadIsCurrent()) return;
+    const [decodedTiles, images] = await Promise.all([
+      decodeSnapshotTilesInBatches(tileEntries, loadIsCurrent),
       decodeStoredImages(item.images),
     ]);
-    if(loadGeneration!==state.snapshotLoadGeneration||state.userRevision!==expectedRevision)return;
-    await enableSnapshotWidgetPlugins(item.widgets);
-    if(loadGeneration!==state.snapshotLoadGeneration||state.userRevision!==expectedRevision)return;
+    if (!decodedTiles || !loadIsCurrent()) {
+      if (decodedTiles) releaseSnapshotTileCanvases(decodedTiles);
+      return;
+    }
     state.userRevision++;
     invalidateRecognition();
     cancelPendingForRevision();
     clearTextEditors();
+    for (const canvas of tiles.values()) canvas.width = canvas.height = 1;
     tiles.clear();
     clearSharpOverlays();
     state.inkBounds.clear();
@@ -538,14 +694,11 @@
     state.historyBefore.clear();
     state.imageHistoryBefore = null;
     state.textBoxHistoryBefore = null;
-    for (const { k, image } of decoded) {
-      const canvas = offscreen(TILE, TILE);
-      canvas.getContext("2d").drawImage(image, 0, 0);
-      tiles.set(k, canvas);
-    }
+    for (const [k, canvas] of decodedTiles) tiles.set(k, canvas);
+    decodedTiles.clear();
     restoreAnimations(item.animations);
     restoreWidgets(item.widgets);
-    if (["arcane", "scifi", "research", "studio"].includes(item.theme)) applyTheme(item.theme);
+    applyTheme(item.theme);
     restoreImages(images);
     await restoreTextBoxes(item.textBoxes);
     if (item.view) {
@@ -554,9 +707,12 @@
       state.panY = item.view.panY;
       updateCoordinates();
     }
+    setCanvasNavigationLocked(item.view?.navigationLocked === true);
     state.currentSnapshotId = item.id;
     state.currentSnapshotName = snapshotName(item);
     state.currentSnapshotLocation = location;
+    state.currentSnapshotProjectId = item.projectId || null;
+    state.snapshotSavedRevision = state.userRevision;
     render();
     closeHistoryPanel();
     setStatusKey("snapshotLoaded");
@@ -587,14 +743,25 @@
       state.currentSnapshotId = null;
       state.currentSnapshotName = "";
       state.currentSnapshotLocation = null;
+      state.currentSnapshotProjectId = null;
     }
     await refreshSnapshots();
     setStatusKey("snapshotDeleted");
   }
   function updateNewCanvasDialog() {
     const label = document.querySelector("#currentSnapshotLabel"),
-      overwrite = document.querySelector("#newOverwrite");
+      overwrite = document.querySelector("#newOverwrite"),
+      title = document.querySelector("#newCanvasTitle"),
+      description = document.querySelector("#newCanvasDialog > form > p:not(.current-snapshot)"),
+      discard = document.querySelector("#newDiscard"),
+      saveCopy = document.querySelector("#newSaveCopy"),
+      loading = Boolean(pendingCanvasTransition);
     if (!label || !overwrite) return;
+    if (title) title.textContent = t(loading ? "loadCanvasTitle" : "newCanvasTitle");
+    if (description) description.textContent = t(loading ? "loadCanvasDescription" : "newCanvasDescription");
+    if (discard) discard.textContent = t(loading ? "loadWithoutSave" : "newWithoutSave");
+    if (saveCopy) saveCopy.textContent = t(loading ? "saveAsNewAndLoad" : "saveAsNewAndCreate");
+    overwrite.textContent = t(loading ? "overwriteAndLoad" : "overwriteAndCreate");
     if (!state.currentSnapshotId) label.textContent = t("noCurrentSnapshot");
     else {
       const sameLocation = state.currentSnapshotLocation === state.snapshotLocation,
@@ -609,7 +776,7 @@
   function setNewCanvasDialogBusy(busy) {
     const dialog = document.querySelector("#newCanvasDialog");
     dialog.dataset.busy = String(busy);
-    dialog.querySelectorAll("button, input").forEach((control) => (control.disabled = busy));
+    dialog.querySelectorAll("button, input, select").forEach((control) => (control.disabled = busy));
     if (!busy) updateNewCanvasDialog();
   }
   function startBlankCanvas() {
@@ -637,14 +804,18 @@
     state.currentSnapshotId = null;
     state.currentSnapshotName = "";
     state.currentSnapshotLocation = null;
+    state.currentSnapshotProjectId = null;
     state.viewInitialized = false;
     state.aiDraftReturnMode = null;
     state.pendingHistoryRestored = false;
+    setCanvasNavigationLocked(false);
     setCanvasMode("pen", {
       preserveSelection:true,
       skipDraftFinalize:true,
       preserveWidgetRefinement:true,
     });
+    state.snapshotSavedRevision = state.userRevision;
+    pendingCanvasTransition = null;
     document.querySelector("#newSnapshotName").value = "";
     if (dialog.open) dialog.close();
     if (document.querySelector("#historyPanel").classList.contains("open")) closeHistoryPanel();
@@ -652,10 +823,11 @@
     setStatusKey("newCanvasReady");
   }
   function openNewCanvasDialog() {
-    if (!tiles.size && !state.images.length && !state.textBoxes.length && (!pluginEnabled("animation") || !state.animations.length) && !visibleWidgets().length) {
+    if (!canvasHasUnsavedChanges()) {
       startBlankCanvas();
       return;
     }
+    pendingCanvasTransition = null;
     const dialog = document.querySelector("#newCanvasDialog");
     document.querySelector("#newSnapshotName").value = "";
     setNewCanvasDialogBusy(false);
@@ -673,28 +845,144 @@
         setNewCanvasDialogBusy(false);
         return;
       }
-      startBlankCanvas();
+      const transition = pendingCanvasTransition;
+      pendingCanvasTransition = null;
+      if (transition) {
+        const dialog = document.querySelector("#newCanvasDialog");
+        if (dialog.open) dialog.close();
+        await loadSnapshot(transition.id, transition.location);
+      } else startBlankCanvas();
     } catch (error) {
       setStatus(`${t("snapshotError")}${error.message}`);
       setNewCanvasDialogBusy(false);
     }
   }
+  function canvasHasUnsavedChanges() {
+    const hasContent = tiles.size || state.images.length || state.textBoxes.length || (pluginEnabled("animation") && state.animations.length) || visibleWidgets().length;
+    return Boolean(hasContent && (state.dirty || state.userRevision !== state.snapshotSavedRevision));
+  }
+  function requestLoadSnapshot(id, location = state.snapshotLocation) {
+    if (!canvasHasUnsavedChanges()) return loadSnapshot(id, location);
+    pendingCanvasTransition = { id, location };
+    const dialog = document.querySelector("#newCanvasDialog");
+    document.querySelector("#newSnapshotName").value = "";
+    setNewCanvasDialogBusy(false);
+    updateNewCanvasDialog();
+    if (!dialog.open) dialog.showModal();
+    return Promise.resolve(false);
+  }
+  function discardCanvasTransition() {
+    const transition = pendingCanvasTransition;
+    pendingCanvasTransition = null;
+    if (!transition) return startBlankCanvas();
+    const dialog = document.querySelector("#newCanvasDialog");
+    if (dialog.open) dialog.close();
+    return loadSnapshot(transition.id, transition.location);
+  }
   function snapshotName(item) {
     return item.name || new Intl.DateTimeFormat(state.language === "zh" ? "zh-CN" : "en", { dateStyle: "medium", timeStyle: "short" }).format(item.createdAt);
   }
+  function serverProjectName(project) {
+    return project?.id === SERVER_DEFAULT_PROJECT_ID || project?.system ? t("canvasProjectUncategorized") : project?.name || t("canvasProjectUncategorized");
+  }
+  function renderServerProjectUi() {
+    const manager = document.querySelector("#serverProjectManager"),
+      select = document.querySelector("#historyProjectSelect"),
+      remove = document.querySelector("#historyProjectDelete"),
+      dialogField = document.querySelector("#newCanvasProjectField"),
+      dialogSelect = document.querySelector("#newCanvasProjectSelect");
+    if (!manager || !select || !remove) return;
+    const visible = state.snapshotLocation === "server";
+    manager.hidden = !visible;
+    if (dialogField) dialogField.hidden = !visible;
+    if (!visible) return;
+    const projects = serverCanvasProjects.length
+      ? serverCanvasProjects
+      : [{ id:SERVER_DEFAULT_PROJECT_ID, name:"Uncategorized", system:true }];
+    select.replaceChildren();
+    const all = document.createElement("option");
+    all.value = SERVER_ALL_PROJECTS_ID;
+    all.textContent = t("canvasProjectAll");
+    select.append(all);
+    for (const project of projects) {
+      const option = document.createElement("option");
+      option.value = project.id;
+      option.textContent = serverProjectName(project);
+      select.append(option);
+    }
+    if (serverCanvasProjects.length && ![...select.options].some((option) => option.value === selectedServerProjectId)) rememberSelectedServerProject(SERVER_DEFAULT_PROJECT_ID);
+    select.value = selectedServerProjectId;
+    if (!select.value) select.value = SERVER_ALL_PROJECTS_ID;
+    const selected = serverCanvasProjects.find((project) => project.id === selectedServerProjectId);
+    remove.disabled = !selected || selected.id === SERVER_DEFAULT_PROJECT_ID || selected.system === true;
+    if (dialogSelect) {
+      dialogSelect.replaceChildren();
+      for (const project of projects) {
+        const option = document.createElement("option");
+        option.value = project.id;
+        option.textContent = serverProjectName(project);
+        dialogSelect.append(option);
+      }
+      dialogSelect.value = selectedServerSaveProjectId();
+      if (!dialogSelect.value) dialogSelect.value = SERVER_DEFAULT_PROJECT_ID;
+    }
+  }
+  async function createServerProject() {
+    const name = prompt(t("canvasProjectName"), "")?.trim().slice(0, 48);
+    if (!name) return;
+    const response = await fetch("/api/canvas-projects", {
+        method:"POST",
+        credentials:"same-origin",
+        headers:authenticatedApiHeaders({ "Content-Type":"application/json" }),
+        body:JSON.stringify({ name }),
+      }),
+      body = await snapshotApiResponse(response);
+    rememberSelectedServerProject(body.project.id);
+    await refreshSnapshots();
+    showHistoryNoticeKey("canvasProjectCreated", "success");
+  }
+  async function deleteSelectedServerProject() {
+    const project = serverCanvasProjects.find((item) => item.id === selectedServerProjectId);
+    if (!project || project.id === SERVER_DEFAULT_PROJECT_ID || project.system) return;
+    const response = await fetch(`/api/canvas-projects/${encodeURIComponent(project.id)}`, {
+      method:"DELETE",
+      credentials:"same-origin",
+      headers:authenticatedApiHeaders(),
+    });
+    await snapshotApiResponse(response);
+    rememberSelectedServerProject(SERVER_DEFAULT_PROJECT_ID);
+    await refreshSnapshots();
+    showHistoryNoticeKey("canvasProjectDeleted", "success", 4200);
+  }
+  async function moveServerSnapshot(id, projectId) {
+    const response = await fetch(`/api/canvases/${encodeURIComponent(id)}/project`, {
+      method:"PUT",
+      credentials:"same-origin",
+      headers:authenticatedApiHeaders({ "Content-Type":"application/json" }),
+      body:JSON.stringify({ projectId }),
+    });
+    await snapshotApiResponse(response);
+    if (state.currentSnapshotId === id && state.currentSnapshotLocation === "server") state.currentSnapshotProjectId = projectId;
+    await refreshSnapshots();
+    showHistoryNoticeKey("canvasProjectMoved", "success");
+  }
   function renderSnapshotList() {
     const list = document.querySelector("#historyList"),
-      location = state.snapshotLocation;
+      location = state.snapshotLocation,
+      items = location === "server" && selectedServerProjectId !== SERVER_ALL_PROJECTS_ID
+        ? snapshotItems.filter((item) => (item.projectId || SERVER_DEFAULT_PROJECT_ID) === selectedServerProjectId)
+        : snapshotItems;
     if (!list) return;
+    renderServerProjectUi();
     list.replaceChildren();
-    if (!snapshotItems.length) {
+    if (!items.length) {
       const empty = document.createElement("div");
       empty.className = "history-empty";
-      empty.textContent = t(state.snapshotLocation === "server" ? "emptyServerHistory" : "emptyDeviceHistory");
+      empty.textContent = t(location === "server" && snapshotItems.length ? "emptyProjectHistory" : location === "server" ? "emptyServerHistory" : "emptyDeviceHistory");
       list.append(empty);
       return;
     }
-    for (const item of snapshotItems) {
+    for (const item of items) {
       const card = document.createElement("article"),
         preview = document.createElement("div"),
         image = document.createElement("img"),
@@ -718,18 +1006,44 @@
       preview.append(image);
       meta.className = "history-meta";
       title.textContent = snapshotName(item);
-      detail.textContent = `${new Intl.DateTimeFormat(state.language === "zh" ? "zh-CN" : "en", { dateStyle: "short", timeStyle: "short" }).format(item.createdAt)} · ${item.tileCount} ${t("snapshotTiles")}`;
-      if (pluginEnabled("animation") && item.animationCount) detail.textContent += " · " + item.animationCount + " " + t("snapshotAnimations");
-      if (item.widgetCount) detail.textContent += " · " + item.widgetCount + " " + t("snapshotWidgets");
-      if (item.imageCount) detail.textContent += " · " + item.imageCount + " " + t("snapshotImages");
+      const modified = new Intl.DateTimeFormat(state.language === "zh" ? "zh-CN" : "en", { dateStyle: "short", timeStyle: "short" }).format(item.updatedAt || item.createdAt);
+      detail.textContent = t("snapshotModified").replace("{time}", modified);
+      const stats = document.createElement("div"),
+        counts = [[item.tileCount, "snapshotTiles"]];
+      if (pluginEnabled("animation") && item.animationCount) counts.push([item.animationCount, "snapshotAnimations"]);
+      if (item.widgetCount) counts.push([item.widgetCount, "snapshotWidgets"]);
+      if (item.imageCount) counts.push([item.imageCount, "snapshotImages"]);
+      stats.className = "history-stats";
+      for (const [count, key] of counts) {
+        const chip = document.createElement("span");
+        chip.className = "history-stat";
+        chip.textContent = `${count} ${t(key)}`;
+        stats.append(chip);
+      }
       actions.className = "history-actions";
+      load.className = "history-load";
       load.textContent = t("loadSnapshot");
-      load.onclick = () => runSnapshotAction(() => loadSnapshot(item.id, location));
+      load.onclick = () => runSnapshotLoadAction(load, () => requestLoadSnapshot(item.id, location));
       remove.className = "history-delete";
       remove.textContent = t("deleteSnapshot");
       remove.onclick = () => runSnapshotAction(() => deleteSnapshot(item.id, location));
       actions.append(load, remove);
-      meta.append(title, detail, actions);
+      meta.append(title, detail, stats, actions);
+      if (location === "server") {
+        const move = document.createElement("select");
+        move.className = "history-move";
+        move.setAttribute("aria-label", t("canvasProjectMove"));
+        move.title = t("canvasProjectMove");
+        for (const project of serverCanvasProjects) {
+          const option = document.createElement("option");
+          option.value = project.id;
+          option.textContent = `${t("canvasProject")}: ${serverProjectName(project)}`;
+          move.append(option);
+        }
+        move.value = item.projectId || SERVER_DEFAULT_PROJECT_ID;
+        move.onchange = () => runSnapshotAction(() => moveServerSnapshot(item.id, move.value));
+        meta.append(move);
+      }
       card.append(preview, meta);
       list.append(card);
     }
@@ -747,6 +1061,17 @@
       await action();
     } catch (error) {
       setStatus(`${t("snapshotError")}${error.message}`);
+    }
+  }
+  async function runSnapshotLoadAction(button, action) {
+    if (button.disabled) return;
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    try {
+      await runSnapshotAction(action);
+    } finally {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
     }
   }
   function openHistoryPanel() {
@@ -820,8 +1145,9 @@
       x = Math.min(a.x, b.x) - pad,
       y = Math.min(a.y, b.y) - pad,
       w = Math.abs(a.x - b.x) + pad * 2,
-      h = Math.abs(a.y - b.y) + pad * 2;
-    invalidateSharpOverlays({ x, y, w, h });
+      h = Math.abs(a.y - b.y) + pad * 2,
+      changedBox = { x, y, w, h };
+    invalidateSharpOverlays(changedBox);
     const x0 = Math.max(0, Math.floor(x / TILE)),
       y0 = Math.max(0, Math.floor(y / TILE)),
       x1 = Math.min(Math.ceil(SIZE / TILE) - 1, Math.floor((x + w) / TILE)),
@@ -845,6 +1171,7 @@
         q.lineTo(b.x - tx * TILE, b.y - ty * TILE);
         q.stroke();
         q.restore();
+        if (userChange) trackDirtyStrokeSegment(tx, ty, a, b, erase, size, changedBox);
         const k = key(tx, ty);
         if (erase) state.inkBounds.delete(k);
         else {
@@ -857,7 +1184,7 @@
           extendInkBounds(k, local);
         }
       }
-    if (userChange) {
+    if (userChange && !erase) {
       mergeDirty(a.x, a.y, pad);
       mergeDirty(b.x, b.y, pad);
     }

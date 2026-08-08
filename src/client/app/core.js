@@ -2,6 +2,7 @@
 (() => {
   const SIZE = 20000,
     TILE = 512,
+    DIRTY_MASK_SCALE = 0.25,
     INITIAL_VIEW_ZOOM = 1.5,
     EXPORT_MAX_DIMENSION = 16384,
     EXPORT_MAX_PIXELS = 64 * 1024 * 1024,
@@ -14,10 +15,13 @@
     DEFAULT_AI_TIMEOUT = 260000,
     screen = document.querySelector("#screen"),
     view = document.querySelector("#viewport"),
+    canvasNavigationLock = document.querySelector("#canvasNavigationLock"),
     ctx = screen.getContext("2d"),
     animationLayer = document.querySelector("#animationLayer"),
     animationCtx = animationLayer.getContext("2d"),
     widgetLayer = document.querySelector("#widgetLayer"),
+    placedContentLayer = document.querySelector("#placedContentLayer"),
+    placedContentCtx = placedContentLayer.getContext("2d"),
     summonLayer = document.querySelector("#summonLayer"),
     inkLayer = document.querySelector("#inkLayer"),
     inkCtx = inkLayer.getContext("2d"),
@@ -56,6 +60,7 @@
     pluginSave = document.querySelector("#pluginSave"),
     status = document.querySelector("#status"),
     coords = document.querySelector("#coords"),
+    canvasHint = document.querySelector("#canvasHint"),
     debugList = document.querySelector("#debugEvents"),
     debugRequest = document.querySelector("#debugRequest"),
     embodiment = document.querySelector("#aiEmbodiment"),
@@ -97,7 +102,50 @@
     settingsPanel = document.querySelector("#settingsPanel"),
     settingsButton = document.querySelector("#settingsBtn"),
     settingsCloseButton = document.querySelector("#settingsClose"),
+    settingsOpenApi = document.querySelector("#settingsOpenApi"),
+    settingsOpenSystem = document.querySelector("#settingsOpenSystem"),
+    configurationLayer = document.querySelector("#configurationLayer"),
+    configurationBackdrop = document.querySelector("#configurationBackdrop"),
+    configurationPanel = document.querySelector("#configurationPanel"),
+    configurationBody = document.querySelector("#configurationBody"),
+    configurationTitle = document.querySelector("#configurationTitle"),
+    configurationSubtitle = document.querySelector("#configurationSubtitle"),
+    configurationClose = document.querySelector("#configurationClose"),
+    connectionManager = document.querySelector("#connectionManager"),
+    connectionLimitText = document.querySelector("#connectionLimitText"),
+    settingsConnectionList = document.querySelector("#settingsConnectionList"),
+    settingsConnectionQuickList = document.querySelector("#settingsConnectionQuickList"),
+    settingsConnectionStatus = document.querySelector("#settingsConnectionStatus"),
+    settingsAddConnection = document.querySelector("#settingsAddConnection"),
+    canvasSettingsForm = document.querySelector("#canvasSettingsForm"),
+    settingsProvider = document.querySelector("#settingsProvider"),
+    settingsApiFields = document.querySelector("#settingsApiFields"),
+    settingsApiPresetFields = document.querySelector("#settingsApiPresetFields"),
+    settingsApiRegion = document.querySelector("#settingsApiRegion"),
+    settingsApiService = document.querySelector("#settingsApiService"),
+    settingsCliFields = document.querySelector("#settingsCliFields"),
+    settingsCliModel = document.querySelector("#settingsCliModel"),
+    settingsCliPath = document.querySelector("#settingsCliPath"),
+    settingsApiFormat = document.querySelector("#settingsApiFormat"),
+    settingsApiUrl = document.querySelector("#settingsApiUrl"),
+    settingsApiModel = document.querySelector("#settingsApiModel"),
+    settingsApiModelPresets = document.querySelector("#settingsApiModelPresets"),
+    settingsApiKey = document.querySelector("#settingsApiKey"),
+    settingsApiSaved = document.querySelector("#settingsApiSaved"),
+    settingsEffort = document.querySelector("#settingsEffort"),
+    settingsMaxTokens = document.querySelector("#settingsMaxTokens"),
+    settingsTimeout = document.querySelector("#settingsTimeout"),
+    settingsAutoDelay = document.querySelector("#settingsAutoDelay"),
+    settingsImageFormat = document.querySelector("#settingsImageFormat"),
+    settingsTraceToggle = document.querySelector("#settingsTraceToggle"),
+    settingsTraceLimit = document.querySelector("#settingsTraceLimit"),
+    settingsSaveButton = document.querySelector("#settingsSave"),
+    settingsTestConnection = document.querySelector("#settingsTestConnection"),
+    settingsInstallCli = document.querySelector("#settingsInstallCli"),
+    settingsEditorCancel = document.querySelector("#settingsEditorCancel"),
+    settingsSaveStatus = document.querySelector("#settingsSaveStatus"),
     settingsAutoToggle = document.querySelector("#settingsAutoToggle"),
+    settingsWidgetShadowToggle = document.querySelector("#settingsWidgetShadowToggle"),
     summonToggle = document.querySelector("#summonToggle"),
     settingsTourButton = document.querySelector("#settingsTourBtn"),
     settingsChangelogButton = document.querySelector("#settingsChangelogBtn");
@@ -109,6 +157,22 @@
   const ANIMATION = window.PENECHO_ANIMATION;
   const PLUGINS = window.PENECHO_PLUGINS;
   const SUMMON = window.PENECHO_SUMMON;
+  const API_PRESETS = Object.freeze({
+    "kimi-global-api":Object.freeze({ family:"kimi", region:"global", service:"api", format:"openai", url:"https://api.moonshot.ai/v1", model:"kimi-k3" }),
+    "kimi-china-api":Object.freeze({ family:"kimi", region:"china", service:"api", format:"openai", url:"https://api.moonshot.cn/v1", model:"kimi-k3" }),
+    "kimi-global-coding":Object.freeze({ family:"kimi", region:"global", service:"coding", format:"openai", url:"https://api.kimi.com/coding/v1", model:"k3" }),
+    "kimi-china-coding":Object.freeze({ family:"kimi", region:"china", service:"coding", format:"openai", url:"https://api.kimi.com/coding/v1", model:"k3" }),
+    "minimax-global-api":Object.freeze({ family:"minimax", region:"global", service:"api", format:"openai", url:"https://api.minimax.io/v1", model:"MiniMax-M3" }),
+    "minimax-china-api":Object.freeze({ family:"minimax", region:"china", service:"api", format:"openai", url:"https://api.minimaxi.com/v1", model:"MiniMax-M3" }),
+    "minimax-global-coding":Object.freeze({ family:"minimax", region:"global", service:"coding", format:"anthropic", url:"https://api.minimax.io/anthropic", model:"MiniMax-M3" }),
+    "minimax-china-coding":Object.freeze({ family:"minimax", region:"china", service:"coding", format:"anthropic", url:"https://api.minimaxi.com/anthropic", model:"MiniMax-M3" }),
+  });
+  const API_MODELS = Object.freeze({
+    openai:Object.freeze(["gpt-5.6-sol"]),
+    anthropic:Object.freeze(["claude-opus-4-8"]),
+    kimi:Object.freeze(["k3", "kimi-k3"]),
+    minimax:Object.freeze(["MiniMax-M3", "MiniMax-M2.7"]),
+  });
   const EFFORT_LEVELS = ["none", "low", "medium", "high", "max"],
     EFFORT_OPTIONS = ["config", ...EFFORT_LEVELS],
     TEXT_EDITOR_DEFAULT_WIDTH = 320,
@@ -197,6 +261,7 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       guideStudio: "Studio assistant",
       boardTools: "Board tools",
       hand: "Hand tool: move canvas and objects",
+      handAutoAIManual: "Hand mode pauses Auto AI · Use the AI button to run it manually.",
       pen: "Pen",
       eraser: "Eraser",
       select: "Lasso select",
@@ -224,7 +289,7 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       imageMerged: "Merged into canvas ink — the eraser now works on it",
       imageEditBarLabel: "Image actions",
       imagePlace: "Place image",
-      imagePlaceHint: "Keep it as an image; use Hand and its top handle to edit again",
+      imagePlaceHint: "Keep it as an image; tap it in Hand to reveal its edit controls",
       imageMerge: "Merge into ink",
       imageMergeHint: "Fuse into the canvas; the eraser then works on it",
       imageDelete: "Delete image",
@@ -253,6 +318,9 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       grid: "Canvas grid",
       gridOn: "Show canvas grid",
       gridOff: "Hide canvas grid",
+      canvasLockNavigation: "Lock canvas navigation",
+      canvasUnlockNavigation: "Unlock canvas navigation",
+      canvasNavigationLockedHint: "Canvas view locked · Click the top-left lock to unlock",
       researchGridDefault: "Research grid (off by default)",
       font: "Font",
       aiFont: "AI font",
@@ -289,6 +357,7 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       canvas: "Zoomable handwritten AI canvas",
       aiGuide: "AI knowledge guide",
       openAIMenu: "Open AI action menu",
+      stopAIRequest: "Stop current AI request",
       aiActions: "AI actions",
       answer: "Answer",
       hint: "Hint",
@@ -311,7 +380,7 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       tourPluginsTitle: "Real photos and professional diagrams",
       tourPluginsBody: "Real Photos is on by default and usually shows one web photo. Professional Diagrams is also on by default and creates editable professional visuals with copyable source. Manage both in Plugins.",
       tourHandTitle: "Move objects with the Hand tool",
-      tourHandBody: "Choose Hand, then use the small top handle to move outlined images, animations, and AI HTML widgets. Hand also lets you click inside HTML widgets; drag empty space to pan.",
+      tourHandBody: "Choose Hand, then tap an image, animation, text box, or AI widget to reveal its controls. HTML widgets remain interactive; drag empty space to pan.",
       tourStudioThemeTitle: "Try the new Studio theme",
       tourStudioThemeBody: "Open Theme to switch the canvas's visual style and the AI's response emphasis. The new Studio theme uses a clean, focused interface and favors concise, well-structured, practical answers. You can switch themes at any time.",
       tourLassoTitle: "Work with exactly the content you select",
@@ -319,7 +388,7 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       tourTextTitle: "Add editable text and formulas",
       tourTextBody: "Choose Text, then click the canvas to create an input box. Markdown and likely LaTeX are formatted automatically; Preview shows the exact placement before confirmation. Confirm with the check button or Ctrl/Cmd + Enter.",
       tourImageTitle: "Add images and photos",
-      tourImageBody: "Add a picture from your device; large pictures are compressed automatically. In Hand, use its top handle to move it and edge handles to resize. Place keeps it below ink, while Merge makes it erasable.",
+      tourImageBody: "Add a picture from your device; large pictures are compressed automatically. In Hand, tap it to reveal move and resize controls. Place keeps it below ink, while Merge makes it erasable.",
       tourFullscreenTitle: "Give the canvas the whole screen",
       tourFullscreenBody: "Fullscreen hides surrounding browser space and expands the drawing area. Use the same button—or your browser's fullscreen shortcut—to return.",
       tourFilesTitle: "Start, export, and save locally",
@@ -333,16 +402,92 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       changelogDialog: "PenEcho release notes",
       changelogClose: "Close release notes",
       changelogBadge: "What's new",
-      changelogTitle: "Live public data and more expressive SVG visuals",
-      changelogIntro: "Version 0.8.1 gives General HTML widgets reliable public-data access and makes SVG the default for animation and complex graphics.",
-      changelogVisualPlugins: "When browser CORS blocks a public HTTPS API, RSS feed, or image, General HTML widgets can fall back to PenEcho's local read-only bridge for live, refreshable content without exposing credentials.",
-      changelogCanvasWorkflow: "Animations and complex custom visuals now default to responsive SVG, enabling richer motion, overlays, and scalable graphics while keeping model output compact and token-efficient. Legacy declarative animations no longer load, while older canvases still open without errors.",
+      changelogTitle: "Faster refinement and flexible AI connections",
+      changelogIntro: "Version 0.9.0 makes AI setup, switching, and visual refinement faster, clearer, and more reliable.",
+      changelogConnections: "Save up to ten API or CLI connections, start from Kimi and MiniMax presets, test them in Canvas, and switch the active connection for this device with one click.",
+      changelogRefine: "Write instructions anywhere in the current viewport, choose the widget to update, and refine it with a standard unified diff that reduces tokens. Hand stays clear until you tap an object to reveal its controls.",
+      changelogStreaming: "API requests now use true SSE streaming, reducing long silent waits, improving responsiveness, and keeping lengthy model responses more stable through compatible gateways.",
+      changelogProgress: "The top status area now shows each request stage, live response receipt, retries, long-wait notices, and cancellation; the magic button can stop active requests immediately.",
       changelogEarlierTitle: "Earlier highlights",
-      changelogImagesSummary: "0.8.0 added professional diagrams with editable source, direct widget refinement, server-backed canvas storage, and richer clipboard workflows.",
-      changelogPluginsSummary: "0.7.2 added sourced web photos, more reliable canvas persistence and export, and simpler protected local access.",
+      changelogImagesSummary: "0.8.1 added live public-data access for General HTML widgets and SVG-first animation and complex graphics.",
+      changelogPluginsSummary: "0.8.0 and earlier added editable professional diagrams, server-backed canvas storage, clipboard workflows, sourced web photos, and more reliable editing and export.",
       changelogDone: "Got it",
       settingsTitle: "Settings",
       settingsClose: "Close settings",
+      settingsApiSection: "AI connection",
+      settingsApiDescription: "Choose an API or an existing local CLI login.",
+      settingsProvider: "AI provider",
+      settingsCliModel: "Model (optional)",
+      settingsCliPath: "Command or path",
+      settingsCliHelp: "Uses the CLI's existing local login. Test the connection for installation and sign-in guidance.",
+      settingsConfiguration: "Configuration",
+      settingsConnections: "AI connections",
+      settingsManage: "Manage",
+      settingsApiEntry: "API & CLI settings",
+      settingsApiEntryHelp: "Changes apply immediately",
+      settingsSystemEntry: "System settings",
+      settingsSystemEntryHelp: "Restart required after saving",
+      settingsApiDialogTitle: "API & CLI settings",
+      settingsApiDialogSubtitle: "Connections are shared with every client. Your current choice is private to this device and applies immediately.",
+      settingsConnectionEditor: "Connection details",
+      settingsEffortToolbarHelp: "You can quickly change reasoning for any request from the Canvas toolbar.",
+      settingsSavedConnections: "Saved connections",
+      settingsConnectionCount: "{count} of {limit} connections",
+      settingsAddConnection: "Add connection",
+      settingsSaveConnection: "Save connection",
+      settingsTestConnection: "Test connection",
+      settingsTestingConnection: "Testing the model with a small image request…",
+      settingsConnectionTestPassed: "Connection ready. The model accepted the image and responded successfully.",
+      settingsConnectionTestFailed: "Connection test failed.",
+      settingsInstallCli: "Install CLI",
+      settingsInstallingCli: "Downloading, verifying, and installing the official CLI…",
+      settingsCliInstalled: "CLI installed. Testing the connection again…",
+      settingsCliInstallFailed: "Automatic CLI installation failed.",
+      settingsCancel: "Cancel",
+      settingsActive: "Current",
+      settingsUse: "Use",
+      settingsEdit: "Edit",
+      settingsDelete: "Delete",
+      settingsDefaultConnection: "Default connection",
+      settingsApiSummary: "{model} · {url}",
+      settingsCliSummary: "{provider} · {model}",
+      settingsCliDefaultModel: "CLI default model",
+      settingsConnectionActivated: "Connection changed. New requests will use it immediately.",
+      settingsConnectionDeleted: "Connection deleted.",
+      settingsConnectionSaved: "Connection saved. Devices using it will apply the changes to new requests immediately.",
+      settingsDeleteConfirm: "Delete this connection?",
+      settingsSystemDialogTitle: "System settings",
+      settingsSystemDialogSubtitle: "Saved changes take effect after PenEcho restarts.",
+      settingsKeySaved: "Key saved",
+      settingsApiFormat: "API format",
+      settingsApiRegion: "Access region",
+      settingsApiRegionGlobal: "Global",
+      settingsApiRegionChina: "Mainland China",
+      settingsApiService: "Service",
+      settingsApiServiceApi: "API",
+      settingsApiServiceCoding: "Coding Plan",
+      settingsApiModel: "Model",
+      settingsApiUrl: "Base URL",
+      settingsApiKey: "API key",
+      settingsApiKeyHelp: "Stored only in the local PenEcho configuration file.",
+      settingsSystemSection: "System",
+      settingsSystemDescription: "Simple defaults for requests and canvas behavior.",
+      settingsEffort: "Reasoning",
+      settingsMaxTokens: "Maximum response tokens",
+      settingsMaxTokensHelp: "Includes thinking tokens. Default 20,000; must be larger than 15,000. Low limits may be exhausted during reasoning.",
+      settingsTimeout: "Timeout",
+      settingsAutoDelay: "Auto AI delay",
+      settingsImageFormat: "Canvas image",
+      settingsTraceLimit: "Keep request traces",
+      settingsRequestTrace: "Record request details",
+      settingsSave: "Save settings",
+      settingsLoading: "Loading settings…",
+      settingsLoadFailed: "Could not load settings.",
+      settingsSaving: "Saving…",
+      settingsProviderApplied: "Saved and applied. New AI requests will use this connection immediately—no restart required.",
+      settingsSystemSaved: "Saved. Restart PenEcho to apply these system changes.",
+      settingsCanvasSection: "Canvas preferences",
+      settingsWidgetShadow: "Widget & image shadows",
       settingsAISection: "AI",
       settingsSummonSection: "Thinking indicator",
       settingsSummonEnabled: "Show while AI thinks",
@@ -384,6 +529,10 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       summonTip18: "Tip: History can update the current snapshot or save a separate new copy.",
       summonTip19: "Tip: zoom with the wheel, pan with the middle mouse button—the canvas spans twenty thousand squares.",
       summonTip20: "Tip: AI ink color lives in the toolbar; AI font lives in this Settings panel.",
+      summonTip21: "Tip: write changes anywhere in this view, then choose a widget and use AI Refine.",
+      summonTip22: "Tip: tap a widget, or hover it with a mouse, to reveal AI Refine.",
+      summonTip23: "Tip: AI Refine uses the newest strokes, text, and images in this view as instructions.",
+      summonTip24: "Tip: use AI Refine to update a widget in place; regular AI adds a new widget.",
       debugTitle: "PenEcho debug",
       openLocalLog: "Open local server log",
       history: "Canvas history",
@@ -394,6 +543,16 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       storagePenEchoServer: "PenEcho server",
       storageThisDeviceDescription: "Saved only in this browser on this device. Other devices cannot see it.",
       storagePenEchoServerDescription: "Saved on the computer running PenEcho. Anyone using this PenEcho service can see it after passing its access check.",
+      canvasProject: "Project",
+      canvasProjectAll: "All projects",
+      canvasProjectUncategorized: "Uncategorized",
+      canvasProjectNew: "New project",
+      canvasProjectDelete: "Delete project",
+      canvasProjectMove: "Move to project",
+      canvasProjectName: "Project name",
+      canvasProjectCreated: "Project created",
+      canvasProjectDeleted: "Project deleted; its canvases moved to Uncategorized",
+      canvasProjectMoved: "Canvas moved",
       closeHistory: "Close history",
       newCanvas: "New",
       saveCanvas: "Save canvas",
@@ -401,6 +560,8 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       exportPng: "Export PNG",
       newCanvasTitle: "Start a new canvas?",
       newCanvasDescription: "Save confirmed content and animation scenes before starting over. Unconfirmed AI drafts are not included.",
+      loadCanvasTitle: "Load another canvas?",
+      loadCanvasDescription: "This canvas has unsaved changes. Save them before loading another canvas.",
       currentSnapshot: "Current snapshot: {name} · {location}",
       noCurrentSnapshot: "There is no current snapshot to overwrite.",
       currentSnapshotOtherLocation: "Current snapshot {name} is in {location}. Select that location to overwrite it.",
@@ -409,6 +570,9 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       newWithoutSave: "Don't save",
       saveAsNewAndCreate: "Save as new",
       overwriteAndCreate: "Overwrite current",
+      loadWithoutSave: "Load without saving",
+      saveAsNewAndLoad: "Save as new and load",
+      overwriteAndLoad: "Save and load",
       snapshotName: "Snapshot name (optional)",
       saveSnapshot: "Save New",
       snapshotSaving: "Saving canvas...",
@@ -417,6 +581,7 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       deleteSnapshot: "Delete",
       emptyDeviceHistory: "No canvases saved on this device yet",
       emptyServerHistory: "No canvases saved on this PenEcho server yet",
+      emptyProjectHistory: "No canvases saved in this project yet",
       emptyCanvas: "The canvas is empty",
       snapshotSaved: "Canvas snapshot saved",
       snapshotOverwritten: "Current snapshot overwritten",
@@ -428,17 +593,43 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       snapshotError: "Canvas history: ",
       snapshotTiles: "canvas tiles",
       snapshotImages: "images",
+      snapshotModified: "Modified {time}",
       deleteSnapshotConfirmDevice: "Delete this snapshot from this device?",
       deleteSnapshotConfirmServer: "Delete this shared snapshot from the PenEcho server?",
-      footerTip: "AI drafts: move the whole group or adjust, accept, and discard items independently",
+      canvasHintWidgetAdded: "Use Pen to mark changes near a widget, then tap the AI Refine button that appears.",
+      canvasHintWidgetAddedAlt: "In Pen, notes anywhere in this view can reveal AI Refine on the target widget.",
+      canvasHintRefineInPlace: "In Pen, add an instruction, then tap AI Refine on the target widget.",
+      canvasHintAIAddsOnly: "Auto AI and manual AI add new widgets; they do not replace existing widgets in place.",
+      canvasHintHand: "Hand lets you interact directly with widget content.",
+      canvasHintHandAlt: "For pinch or two-finger widget gestures, lock the canvas first.",
+      canvasHintWidgetTouchHand: "Use Hand mode to interact directly with this widget's content.",
+      canvasHintLasso: "Lasso handwriting to move, resize, or send only that selection to AI.",
+      canvasHintLassoAlt: "Drag an edge to resize one axis, or a corner to scale uniformly.",
+      canvasHintText: "Text supports Markdown and LaTeX; press Ctrl/Cmd + Enter to confirm.",
+      canvasHintTextAlt: "After confirming text near a widget, switch to Pen and tap AI Refine.",
+      canvasHintEraser: "Eraser removes ink only; use Hand controls to delete canvas objects.",
+      canvasHintEraserAlt: "Erase an instruction before AI runs without changing widgets beneath it.",
       ready: "Ready",
       aiBusy: "AI is working. Please wait.",
       noInk: "Write something first",
       cannotCapture: "Could not capture the newest handwriting",
       observing: "Observing...",
+      aiPreparingCanvas: "Preparing canvas context...",
+      aiSendingRequest: "Sending request...",
+      aiRequestReceived: "Request received by PenEcho",
+      aiPreparingImage: "Preparing model input...",
+      aiConnecting: "Connecting to the model...",
+      aiWaitingResponse: "Waiting for the model...",
+      aiReceivingResponse: "Receiving model response...",
+      aiValidatingResponse: "Checking model response...",
+      aiRetrying: "Correcting response · attempt {attempt}",
+      aiImageFallback: "Retrying with a compatible image · attempt {attempt}",
+      aiStillWaiting: "The model is taking longer than usual · PenEcho timeout {seconds}s",
+      aiCancelled: "AI request cancelled",
+      aiCancelledForInput: "AI request cancelled because new input started",
       deferred: "New ink found; this AI result was deferred",
       writing: "Writing...",
-      aiDone: "AI complete",
+      aiDone: "AI completed",
       draftRejected: "AI draft discarded",
       draftFading: "Continued writing detected; fading the AI draft",
       canvasChanged: "Canvas changed; the old AI draft was discarded",
@@ -572,6 +763,13 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       widgetSourceCopyFailed: "Widget source could not be copied",
       widgetRefine: "AI Refine",
       widgetRefineHint: "Refine and replace this widget using its content and the current canvas",
+      widgetRefineNearbyHint: "New annotations were detected near this widget. Use AI Refine to update it from those instructions.",
+      widgetRefineViewportHint: "New instructions are present in this view. Use AI Refine to update this widget from them.",
+      widgetRefineNoInputHint: "AI Refine needs a clear instruction. Add a note or drawing to show what should change.",
+      widgetRefineConfirmDirty: "Update this widget using the new instructions?",
+      widgetRefineConfirmNoInput: "No change request was found. Continue anyway? AI may not know what you want changed.",
+      widgetRefineConfirm: "Update widget",
+      widgetRefineCancel: "Cancel",
       widgetRefinePending: "New marks detected near this diagram. Use its AI Refine button to update it, or choose a manual AI action above. Auto AI is paused.",
       widgetRefining: "AI is refining this widget",
       widgetReplacementReady: "Review the refined replacement",
@@ -587,6 +785,7 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
     zh: ZH,
   };
   const PLUGIN_STORAGE_KEY = "penecho-plugins",
+    SUPPORTED_THEMES = new Set(["arcane", "scifi", "research", "studio"]),
     DIAGRAM_RUNTIME_VERSION = "penecho-diagram-source-v1",
     DIAGRAM_SOURCE_FORMATS = new Set(["mermaid", "dot", "bpmn-xml", "vega-lite", "geojson", "smiles", "cytoscape-json"]),
     BUILTIN_PLUGIN_DEFINITIONS = Object.freeze([]);
@@ -598,6 +797,9 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
     screenCalibration = new Map();
   let diagramRuntimePromise = null;
   let screenClientRatio = 1;
+  function normalizeTheme(theme) {
+    return SUPPORTED_THEMES.has(theme) ? theme : "studio";
+  }
   function storedPluginSettings() {
     let stored = {};
     try {
@@ -619,12 +821,13 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
     storedAutoEnabled = localStorage.getItem("penecho-auto-ai"),
     storedAutoDelayText = localStorage.getItem("penecho-auto-delay-ms"),
     storedSummonEnabled = localStorage.getItem("penecho-summon-enabled"),
+    storedWidgetShadowEnabled = localStorage.getItem("penecho-widget-shadow"),
     storedSnapshotLocation = localStorage.getItem("penecho-snapshot-location"),
     storedAiEffortText = String(localStorage.getItem("penecho-ai-effort") || "").trim().toLowerCase(),
     storedAiEffort = storedAiEffortText === "xhigh" ? "max" : storedAiEffortText,
     storedAutoDelay = storedAutoDelayText === null ? NaN : Number(storedAutoDelayText),
     initialLanguage = TOUR.resolveInitialLanguage(storedPrimaryLanguage, storedLegacyLanguage),
-    initialTheme = ["arcane", "scifi", "research", "studio"].includes(storedTheme) ? storedTheme : "studio",
+    initialTheme = normalizeTheme(storedTheme),
     initialGrid = storedGrid === null ? true : storedGrid === "true",
     initialResearchGrid = storedResearchGrid === "true",
     configuredAutoDelay = Number(window.PENECHO_CONFIG?.autoAiDelayMs),
@@ -635,11 +838,30 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
     initialAutoDelay = Number.isFinite(storedAutoDelay) && storedAutoDelay >= 0 && storedAutoDelay <= 10000 ? storedAutoDelay : Math.min(10000, serverAutoDelay),
     initialAutoEnabled = storedAutoEnabled === null ? true : storedAutoEnabled === "true",
     initialSummonEnabled = storedSummonEnabled === null ? true : storedSummonEnabled === "true",
+    initialWidgetShadowEnabled = storedWidgetShadowEnabled === "true",
     initialSnapshotLocation = storedSnapshotLocation === "server" ? "server" : "device",
     initialAiEffort = EFFORT_OPTIONS.includes(storedAiEffort) ? storedAiEffort : EFFORT_OPTIONS.includes(configuredAiEffort) ? configuredAiEffort : "config",
     initialAiTimeout = Number.isFinite(configuredAiTimeout) && configuredAiTimeout >= 10000 ? configuredAiTimeout : DEFAULT_AI_TIMEOUT;
+  function canvasClientId() {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = [...bytes].map(value => value.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+  const AI_CONNECTION_STORAGE_KEY = "penecho-ai-connection-id",
+    AI_CLIENT_ID = canvasClientId();
+  function selectedAiConnectionId() {
+    const id = String(localStorage.getItem(AI_CONNECTION_STORAGE_KEY) || "default").trim();
+    return id === "default" || /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(id) ? id : "default";
+  }
   function authenticatedApiHeaders(headers = {}) {
-    return configuredAccessSession ? { ...headers, "X-PenEcho-Session":configuredAccessSession } : { ...headers };
+    return configuredAccessSession
+      ? { ...headers, "X-PenEcho-Client":AI_CLIENT_ID, "X-PenEcho-Session":configuredAccessSession }
+      : { ...headers, "X-PenEcho-Client":AI_CLIENT_ID };
+  }
+  function aiRequestHeaders(headers = {}) {
+    return { ...authenticatedApiHeaders(headers), "X-PenEcho-Connection":selectedAiConnectionId() };
   }
   const tiles = new Map(),
     state = {
@@ -657,6 +879,15 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       touches: new Map(),
       touchGesture: null,
       panGesture: null,
+      handToolbarTargets: new Map(),
+      handToolbarActiveKey: null,
+      handToolbarTimer: 0,
+      handHoverKey: null,
+      handPointerFocusKeys: new Map(),
+      handToolbarOperationPointers: new Map(),
+      handWidgetPointerIds: new Set(),
+      handGestureIncludesWidget: false,
+      navigationLocked: false,
       textEditors: new Map(),
       textBoxes: [],
       textEditorStyleSheet: null,
@@ -665,6 +896,7 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       nextTextEditorZ: 1,
       activeTextEditorId: null,
       selectedTextBoxId: null,
+      textBoxGesture: null,
       textBoxHistoryBefore: null,
       animations: [],
       nextAnimationId: 1,
@@ -678,9 +910,16 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       selectedWidgetId: null,
       widgetEdit: null,
       widgetGesture: null,
-      widgetHostPan: null,
       widgetHistoryBefore: null,
       widgetRefineCandidate: null,
+      widgetRefineHoverCandidate: null,
+      widgetRefineConfirmation: null,
+      widgetRefineHoveredWidgetId: null,
+      widgetRefineButtonHoverId: null,
+      widgetRefineClickPulse: null,
+      widgetRefinePointer: null,
+      widgetRefineHoverTimer: 0,
+      widgetRefineHintTimer: 0,
       widgetMessageHooked: false,
       plugins: { ...initialPlugins },
       animationFrame: 0,
@@ -717,6 +956,7 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       hotspotTrail: [],
       auto: initialAutoEnabled,
       summonEnabled: initialSummonEnabled,
+      widgetShadowEnabled: initialWidgetShadowEnabled,
       summonAnchor: null,
       timer: 0,
       autoPopoverTimer: 0,
@@ -734,6 +974,10 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       reasoningEffort: initialAiEffort,
       aiRequestTimeoutMs: initialAiTimeout,
       dirty: null,
+      dirtyInkTiles: new Map(),
+      dirtyInkBounds: new Map(),
+      dirtyImageIds: new Set(),
+      dirtyTextBoxIds: new Set(),
       autoEligible: false,
       lastUserBox: null,
       history: [],
@@ -747,6 +991,8 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       currentSnapshotId: null,
       currentSnapshotName: "",
       currentSnapshotLocation: null,
+      currentSnapshotProjectId: null,
+      snapshotSavedRevision: 0,
       restoreGeneration: 0,
       recognitionGeneration: 0,
       userRevision: 0,
@@ -758,10 +1004,13 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       gridVisible: initialTheme === "research" ? initialResearchGrid : initialGrid,
       paint: { paper: "#ead9ad", paperGrid: "#c8ae7155", outside: "#090814", border: "#7f693b" },
       navigationTimer: 0,
+      aiOrbIdleTimer: 0,
       radialGesture: null,
       radialCloseTimer: 0,
       radialSuppressClickUntil: 0,
       statusKey: "ready",
+      aiProgressEvent: null,
+      canvasHintKey: null,
     };
   let textHelpInvoker = null;
   let pluginStylesPreviewReady = false,
@@ -771,7 +1020,7 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
   const AI_SUPERSEDED = "AI_SUPERSEDED";
   const FEATURE_TOUR_STORAGE_KEY = "penecho-tour-progress";
   const CHANGELOG_STORAGE_KEY = "penecho-changelog-seen";
-  const CHANGELOG_VERSION = "0.8.1";
+  const CHANGELOG_VERSION = "0.9.0";
   // Keep seen IDs stable. Add a new ID (or bump its -vN suffix) to show only that feature to returning users.
   const FEATURE_TOUR_STEPS = Object.freeze([
     { id: "core-effort-v1", targets: ["#aiEffortButton"], titleKey: "tourEffortTitle", bodyKey: "tourEffortBody", placement: "bottom", radius: 8 },
@@ -832,12 +1081,34 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
     element.classList.add(record.className);
     return record.style;
   }
+  const AI_NON_PROGRESS_STATUS_KEYS = new Set(["aiBusy", "aiDone", "aiNoVisibleResponse", "aiError", "aiCancelled", "aiCancelledForInput"]);
   const setStatus = (text, key = null) => {
     status.textContent = text;
     state.statusKey = key;
+    const progress=typeof key==="string"&&key.startsWith("ai")&&!AI_NON_PROGRESS_STATUS_KEYS.has(key);
+    if(!progress)state.aiProgressEvent=null;
+    status.dataset.aiProgress=String(progress);
+    status.title=progress?text:"";
   };
   const setStatusKey = (key) => setStatus(t(key), key);
   const t = (key) => I18N[state.language][key] || I18N.zh[key] || key;
+  function renderCanvasHint(restart = false) {
+    if (!canvasHint || !state.canvasHintKey) return;
+    canvasHint.textContent = `Hint: ${t(state.canvasHintKey)}`;
+    canvasHint.hidden = false;
+    if (!restart) return;
+    canvasHint.classList.remove("is-new");
+    void canvasHint.offsetWidth;
+    canvasHint.classList.add("is-new");
+  }
+  function showCanvasHint(keys) {
+    const candidates = (Array.isArray(keys) ? keys : [keys]).filter((key) => key && (I18N[state.language][key] || I18N.zh[key]));
+    if (!candidates.length) return;
+    const alternatives = candidates.filter((key) => key !== state.canvasHintKey),
+      choices = alternatives.length ? alternatives : candidates;
+    state.canvasHintKey = choices[Math.floor(Math.random() * choices.length)];
+    renderCanvasHint(true);
+  }
   const summonFX = SUMMON?.create({
     fxCanvas:summonLayer,
     textLayer: document.querySelector("#summonTextLayer"),
@@ -863,6 +1134,8 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       }
     }
     for (const widget of state.widgets) rects.push({ x: widget.x, y: widget.y, w: widget.w, h: widget.h });
+    if (state.pendingWidget) rects.push({ x:state.pendingWidget.x, y:state.pendingWidget.y, w:state.pendingWidget.w, h:state.pendingWidget.h });
+    for (const item of state.textBoxes) rects.push({ x:item.x, y:item.y, w:item.w, h:item.h });
     for (const editor of state.textEditors.values()) {
       const scale = Math.max(0.03, state.scale);
       rects.push({ x: editor.x, y: editor.y, w: editor.widthCss / scale, h: editor.heightCss / scale });
@@ -1326,15 +1599,384 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
     focusable[next]?.focus();
     return true;
   }
-  const settings = { open: false, restoreFocus: null };
+  if (configurationBody && canvasSettingsForm) configurationBody.append(canvasSettingsForm);
+  const settings = { open:false, restoreFocus:null, requestTrace:false, cli:{}, currentProvider:"api", configurationMode:"", configurationRestoreFocus:null, connections:[], activeConnectionId:"default", connectionLimit:10, editingConnectionId:null };
+  function syncLocalConnectionSelection() {
+    const selected = selectedAiConnectionId(), activeId = settings.connections.some(connection => connection.id === selected) ? selected : "default";
+    if (activeId !== selected) localStorage.setItem(AI_CONNECTION_STORAGE_KEY, activeId);
+    settings.activeConnectionId = activeId;
+    settings.connections = settings.connections.map(connection => ({ ...connection, active:connection.id === activeId }));
+  }
+  function setConfigurationSection(section, visible) {
+    if (!section) return;
+    section.hidden = !visible;
+    for (const control of section.querySelectorAll("input, select, button")) control.disabled = !visible;
+  }
+  function openConfiguration(mode) {
+    if (!configurationLayer || !canvasSettingsForm) return false;
+    closeSettings(false);
+    settings.configurationMode = mode;
+    settings.configurationRestoreFocus = mode === "api" ? settingsOpenApi : settingsOpenSystem;
+    configurationTitle.textContent = t(mode === "api" ? "settingsApiDialogTitle" : "settingsSystemDialogTitle");
+    configurationSubtitle.textContent = t(mode === "api" ? "settingsApiDialogSubtitle" : "settingsSystemDialogSubtitle");
+    setConfigurationSection(canvasSettingsForm.querySelector(".settings-api-group"), mode === "api");
+    setConfigurationSection(canvasSettingsForm.querySelector(".settings-system-group"), mode === "system");
+    connectionManager.hidden = mode !== "api";
+    canvasSettingsForm.dataset.editorHidden = String(mode === "api");
+    settingsEditorCancel.hidden = mode !== "api";
+    settingsTestConnection.hidden = mode !== "api";
+    settingsInstallCli.hidden = true;
+    settingsSaveButton.textContent = t(mode === "api" ? "settingsSaveConnection" : "settingsSave");
+    canvasSettingsForm.hidden = false;
+    configurationLayer.hidden = false;
+    configurationLayer.setAttribute("aria-hidden", "false");
+    setSettingsStatus();
+    void loadCanvasSettings();
+    requestAnimationFrame(() => configurationPanel.focus({ preventScroll:true }));
+    return true;
+  }
+  function closeConfiguration(restore = true) {
+    if (!settings.configurationMode) return false;
+    const restoreFocus = settings.configurationRestoreFocus;
+    settings.configurationMode = "";
+    settings.configurationRestoreFocus = null;
+    configurationLayer.hidden = true;
+    configurationLayer.setAttribute("aria-hidden", "true");
+    canvasSettingsForm.hidden = true;
+    if (restore) requestAnimationFrame(() => restoreFocus?.focus({ preventScroll:true }));
+    return true;
+  }
+  function updateSettingsProviderFields() {
+    const provider = settingsProvider?.value || "api", api = provider === "api";
+    if (settings.currentProvider !== "api" && settings.currentProvider !== provider) settings.cli[settings.currentProvider] = { model:settingsCliModel.value, path:settingsCliPath.value };
+    settings.currentProvider = provider;
+    settingsApiFields.hidden = !api;
+    settingsCliFields.hidden = api;
+    for (const control of settingsApiFields.querySelectorAll("input, select")) control.disabled = !api || settings.configurationMode !== "api";
+    for (const control of settingsCliFields.querySelectorAll("input, select")) control.disabled = api || settings.configurationMode !== "api";
+    settingsApiSaved.hidden = !api || settingsApiSaved.dataset.saved !== "true";
+    showCliInstaller("", false);
+    if (!api) {
+      const values = settings.cli[provider] || {};
+      settingsCliModel.value = values.model || "";
+      settingsCliPath.value = values.path || ({ "kimi-cli":"kimi", "codex-cli":"codex", "claude-cli":"claude" }[provider] || "");
+    }
+    updateApiPresetFields(false);
+  }
+  function defaultConnectionEffort(provider = settingsProvider?.value || "api") {
+    return "medium";
+  }
+  function selectDefaultConnectionEffort() {
+    settingsEffort.value = defaultConnectionEffort();
+  }
+  function apiPresetForConnection(connection = {}) {
+    if (connection.apiPreset && API_PRESETS[connection.apiPreset]) return [connection.apiPreset, API_PRESETS[connection.apiPreset]];
+    const url = String(connection.apiUrl || "").trim().replace(/\/+$/, ""), format = String(connection.apiFormat || "").trim().toLowerCase();
+    return Object.entries(API_PRESETS).find(([, preset]) => preset.url === url && (!format || preset.format === format)) || null;
+  }
+  function selectedApiPreset() {
+    const family = settingsApiFormat?.value || "openai";
+    return API_PRESETS[`${family}-${settingsApiRegion?.value || "global"}-${settingsApiService?.value || "api"}`] || null;
+  }
+  function updateApiModelPresets(family) {
+    if (!settingsApiModelPresets) return;
+    settingsApiModelPresets.replaceChildren(...(API_MODELS[family] || []).map(model => {
+      const option = document.createElement("option");
+      option.value = model;
+      return option;
+    }));
+  }
+  function updateApiPresetFields(applyDefaults = false, resetModel = false) {
+    if (!settingsApiFormat || !settingsApiPresetFields) return;
+    const family = settingsApiFormat.value, presetFamily = family === "kimi" || family === "minimax",
+      enabled = presetFamily && settingsProvider?.value === "api" && settings.configurationMode === "api";
+    settingsApiPresetFields.hidden = !presetFamily;
+    for (const control of settingsApiPresetFields.querySelectorAll("select")) control.disabled = !enabled;
+    updateApiModelPresets(family);
+    const preset = selectedApiPreset();
+    if (!applyDefaults || !preset) return;
+    settingsApiUrl.value = preset.url;
+    if (resetModel || !settingsApiModel.value.trim()) settingsApiModel.value = preset.model;
+  }
+  function fillApiEditor(connection = {}) {
+    const matched = apiPresetForConnection(connection), preset = matched?.[1] || null;
+    settingsApiFormat.value = preset?.family || (connection.apiFormat === "anthropic" ? "anthropic" : "openai");
+    settingsApiRegion.value = preset?.region || "global";
+    settingsApiService.value = preset?.service || "api";
+    updateApiPresetFields(false);
+    settingsApiUrl.value = connection.apiUrl || (connection.apiFormat === "anthropic" ? "https://api.anthropic.com" : "https://api.openai.com/v1");
+    settingsApiModel.value = connection.apiModel || "";
+  }
+  function connectionProviderLabel(connection) {
+    return { "kimi-cli":"Kimi CLI", "codex-cli":"Codex CLI", "claude-cli":"Claude CLI" }[connection.provider] || connection.provider;
+  }
+  function connectionTitle(connection) {
+    return connection.provider === "api" ? connection.apiModel || "API" : connection.cliModel || t("settingsCliDefaultModel");
+  }
+  function connectionSummary(connection) {
+    return connection.provider === "api" ? connection.apiUrl || "" : connectionProviderLabel(connection);
+  }
+  function setConnectionStatus(message = "", kind = "") {
+    if (!settingsConnectionStatus) return;
+    settingsConnectionStatus.textContent = message;
+    settingsConnectionStatus.className = `settings-save-status${kind ? ` ${kind}` : ""}`;
+  }
+  function renderConnectionLists() {
+    if (!settingsConnectionList || !settingsConnectionQuickList) return;
+    settingsConnectionList.replaceChildren();
+    settingsConnectionQuickList.replaceChildren();
+    for (const connection of settings.connections) {
+      const quick = document.createElement("button"), quickMark = document.createElement("span"), quickCopy = document.createElement("span"), quickName = document.createElement("strong"), quickSummary = document.createElement("small");
+      quick.type = "button";
+      quick.className = `settings-connection-quick${connection.active ? " active" : ""}`;
+      quick.dataset.connectionActivate = connection.id;
+      quickMark.textContent = connection.active ? "✓" : "";
+      quickName.textContent = connectionTitle(connection);
+      quickSummary.textContent = connectionSummary(connection);
+      quickCopy.append(quickName, quickSummary);
+      quick.append(quickMark, quickCopy);
+      settingsConnectionQuickList.append(quick);
+
+      const item = document.createElement("article"), copy = document.createElement("div"), title = document.createElement("div"), name = document.createElement("strong"), summary = document.createElement("p"), actions = document.createElement("div"),
+        editing = settings.editingConnectionId === connection.id;
+      item.className = `settings-connection-item${editing ? " editing" : ""}`;
+      copy.className = "settings-connection-copy";
+      title.className = "settings-connection-title";
+      name.textContent = connectionTitle(connection);
+      title.append(name);
+      if (connection.active) {
+        const badge = document.createElement("span");
+        badge.className = "settings-connection-badge";
+        badge.textContent = t("settingsActive");
+        title.append(badge);
+      }
+      summary.textContent = connectionSummary(connection);
+      copy.append(title, summary);
+      actions.className = "settings-connection-actions";
+      if (!connection.active) {
+        const use = document.createElement("button");
+        use.type = "button";
+        use.dataset.connectionActivate = connection.id;
+        use.textContent = t("settingsUse");
+        actions.append(use);
+      }
+      const edit = document.createElement("button");
+      edit.type = "button";
+      edit.dataset.connectionEdit = connection.id;
+      edit.textContent = t("settingsEdit");
+      actions.append(edit);
+      if (connection.removable) {
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "danger";
+        remove.dataset.connectionDelete = connection.id;
+        remove.textContent = t("settingsDelete");
+        actions.append(remove);
+      }
+      item.append(copy, actions);
+      settingsConnectionList.append(item);
+    }
+    connectionLimitText.textContent = t("settingsConnectionCount").replace("{count}", String(settings.connections.length)).replace("{limit}", String(settings.connectionLimit));
+    settingsAddConnection.disabled = settings.connections.length >= settings.connectionLimit;
+  }
+  function fillConnectionEditor(connection = null) {
+    settings.editingConnectionId = connection?.id || null;
+    const provider = connection?.provider || "api";
+    settingsProvider.value = provider;
+    settings.currentProvider = provider;
+    fillApiEditor(connection || { apiFormat:"openai", apiUrl:"https://api.openai.com/v1", apiModel:"gpt-5.6-sol" });
+    settingsApiKey.value = "";
+    settingsApiSaved.dataset.saved = String(connection?.hasApiKey === true);
+    settings.cli[provider] = { model:connection?.cliModel || "", path:connection?.cliPath || provider.replace("-cli", "") };
+    settingsEffort.value = connection?.effort || defaultConnectionEffort(provider);
+    canvasSettingsForm.dataset.editorHidden = "false";
+    updateSettingsProviderFields();
+    renderConnectionLists();
+    setSettingsStatus();
+    requestAnimationFrame(() => settingsProvider.focus({ preventScroll:true }));
+  }
+  function hideConnectionEditor() {
+    settings.editingConnectionId = null;
+    canvasSettingsForm.dataset.editorHidden = "true";
+    settingsApiKey.value = "";
+    renderConnectionLists();
+    setSettingsStatus();
+  }
+  function setSettingsStatus(message = "", kind = "") {
+    if (!settingsSaveStatus) return;
+    settingsSaveStatus.textContent = message;
+    settingsSaveStatus.className = `settings-save-status${kind ? ` ${kind}` : ""}`;
+  }
+  function connectionEditorPayload() {
+    const provider = settingsProvider.value;
+    if (provider !== "api") settings.cli[provider] = { model:settingsCliModel.value, path:settingsCliPath.value };
+    const apiPreset = provider === "api" ? selectedApiPreset() : null;
+    return {
+      provider, apiFormat:apiPreset?.format || settingsApiFormat.value, apiPreset:apiPreset ? `${apiPreset.family}-${apiPreset.region}-${apiPreset.service}` : "", apiUrl:settingsApiUrl.value, apiModel:settingsApiModel.value,
+      apiKey:settingsApiKey.value, effort:settingsEffort.value,
+      cliModel:provider === "api" ? "" : settingsCliModel.value, cliPath:provider === "api" ? "" : settingsCliPath.value,
+    };
+  }
+  function setConnectionTestBusy(busy) {
+    settingsTestConnection.disabled = busy;
+    settingsSaveButton.disabled = busy;
+    settingsInstallCli.disabled = busy;
+  }
+  function showCliInstaller(provider, visible) {
+    settingsInstallCli.hidden = !visible || !window.penechoDesktop?.installCli || !["kimi-cli", "codex-cli", "claude-cli"].includes(provider);
+    settingsInstallCli.dataset.provider = settingsInstallCli.hidden ? "" : provider;
+  }
+  async function testCanvasConnection() {
+    if (!canvasSettingsForm || !canvasSettingsForm.reportValidity()) return;
+    setConnectionTestBusy(true);
+    showCliInstaller("", false);
+    setSettingsStatus(t("settingsTestingConnection"));
+    try {
+      const connection = connectionEditorPayload(), response = await fetch("/api/settings/connections/test", {
+        method:"POST", headers:authenticatedApiHeaders({ "Content-Type":"application/json" }),
+        body:JSON.stringify({ id:settings.editingConnectionId, connection }),
+      }), body = await response.json();
+      if (!response.ok) {
+        showCliInstaller(body?.provider || connection.provider, body?.installable === true);
+        throw new Error([body?.error, body?.guidance].filter(Boolean).join(" ") || t("settingsConnectionTestFailed"));
+      }
+      setSettingsStatus(body?.message || t("settingsConnectionTestPassed"), "success");
+    } catch (error) { setSettingsStatus(error?.message || t("settingsConnectionTestFailed"), "error"); }
+    finally { setConnectionTestBusy(false); }
+  }
+  async function installCanvasCli() {
+    const provider = settingsInstallCli.dataset.provider;
+    if (!window.penechoDesktop?.installCli || !provider) return;
+    setConnectionTestBusy(true);
+    setSettingsStatus(t("settingsInstallingCli"));
+    try {
+      const result = await window.penechoDesktop.installCli(provider);
+      if (!result?.ok) throw new Error(result?.error || t("settingsCliInstallFailed"));
+      settingsCliPath.value = result.executable;
+      settings.cli[provider] = { model:settingsCliModel.value, path:result.executable };
+      showCliInstaller("", false);
+      setSettingsStatus(t("settingsCliInstalled"), "success");
+    } catch (error) {
+      setSettingsStatus(error?.message || t("settingsCliInstallFailed"), "error");
+      setConnectionTestBusy(false);
+      return;
+    }
+    setConnectionTestBusy(false);
+    await testCanvasConnection();
+  }
+  function updateTraceToggle() {
+    if (!settingsTraceToggle) return;
+    settingsTraceToggle.classList.toggle("on", settings.requestTrace);
+    settingsTraceToggle.setAttribute("aria-checked", String(settings.requestTrace));
+  }
+  async function loadCanvasSettings() {
+    if (!canvasSettingsForm) return;
+    setSettingsStatus(t("settingsLoading"));
+    try {
+      const response = await fetch("/api/settings", { headers:authenticatedApiHeaders() }), body = await response.json();
+      if (!response.ok) throw new Error(body?.error || t("settingsLoadFailed"));
+      settings.connections = Array.isArray(body.connections) ? body.connections : [];
+      syncLocalConnectionSelection();
+      settings.connectionLimit = Number(body.connectionLimit) || 10;
+      settingsProvider.value = body.provider;
+      settings.currentProvider = body.provider;
+      fillApiEditor({ apiPreset:body.apiPreset, apiFormat:body.apiFormat, apiUrl:body.apiUrl, apiModel:body.apiModel });
+      settingsApiKey.value = "";
+      settingsApiSaved.dataset.saved = String(body.hasApiKey);
+      settings.cli = {
+        "kimi-cli":{ model:body.kimiCliModel, path:body.kimiCliPath },
+        "codex-cli":{ model:body.codexModel, path:body.codexPath },
+        "claude-cli":{ model:body.claudeModel, path:body.claudePath },
+      };
+      settingsEffort.value = body.effort || defaultConnectionEffort(body.provider);
+      settingsMaxTokens.value = String(body.maxTokens);
+      settingsTimeout.value = String(body.timeoutSeconds);
+      settingsAutoDelay.value = String(body.autoDelaySeconds);
+      settingsImageFormat.value = body.imageFormat;
+      settingsTraceLimit.value = String(body.requestTraceLimit);
+      settings.requestTrace = body.requestTrace === true;
+      updateTraceToggle();
+      updateSettingsProviderFields();
+      renderConnectionLists();
+      setSettingsStatus();
+    } catch (error) { setSettingsStatus(error?.message || t("settingsLoadFailed"), "error"); }
+  }
+  async function saveCanvasSettings(event) {
+    event?.preventDefault();
+    if (!canvasSettingsForm || !canvasSettingsForm.reportValidity()) return;
+    setConnectionTestBusy(true);
+    setSettingsStatus(t("settingsSaving"));
+    try {
+      const provider = settingsProvider.value, scope = settings.configurationMode, connectionPayload = connectionEditorPayload(), apiPreset = provider === "api" ? selectedApiPreset() : null;
+      const endpoint = scope === "api" ? "/api/settings/connections" : "/api/settings", payload = scope === "api" ? { action:"save", id:settings.editingConnectionId, connection:connectionPayload } : {
+        scope, provider, apiFormat:apiPreset?.format || settingsApiFormat.value, apiPreset:apiPreset ? `${apiPreset.family}-${apiPreset.region}-${apiPreset.service}` : "", apiUrl:settingsApiUrl.value, apiModel:settingsApiModel.value,
+        apiKey:settingsApiKey.value, effort:settingsEffort.value, maxTokens:Number(settingsMaxTokens.value), timeoutSeconds:Number(settingsTimeout.value),
+        autoDelaySeconds:Number(settingsAutoDelay.value), imageFormat:settingsImageFormat.value,
+        requestTrace:settings.requestTrace, requestTraceLimit:Number(settingsTraceLimit.value),
+      };
+      const response = await fetch(endpoint, {
+        method:"POST",
+        headers:authenticatedApiHeaders({ "Content-Type":"application/json" }),
+        body:JSON.stringify(payload),
+      }), body = await response.json();
+      if (!response.ok) throw new Error(body?.error || t("settingsLoadFailed"));
+      if (settingsApiKey.value.trim()) settingsApiSaved.dataset.saved = "true";
+      settingsApiKey.value = "";
+      if (scope === "api") {
+        settings.connections = body.connections || settings.connections;
+        syncLocalConnectionSelection();
+        renderConnectionLists();
+        hideConnectionEditor();
+        setConnectionStatus(t("settingsConnectionSaved"), "success");
+      } else setSettingsStatus(t("settingsSystemSaved"), "success");
+    } catch (error) { setSettingsStatus(error?.message || t("settingsLoadFailed"), "error"); }
+    finally { setConnectionTestBusy(false); }
+  }
+  async function updateConnection(action, id) {
+    setConnectionStatus(t("settingsSaving"));
+    try {
+      const response = await fetch("/api/settings/connections", { method:"POST", headers:authenticatedApiHeaders({ "Content-Type":"application/json" }), body:JSON.stringify({ action, id }) }), body = await response.json();
+      if (!response.ok) throw new Error(body?.error || t("settingsLoadFailed"));
+      settings.connections = body.connections || [];
+      syncLocalConnectionSelection();
+      renderConnectionLists();
+      setConnectionStatus(t(action === "delete" ? "settingsConnectionDeleted" : "settingsConnectionActivated"), "success");
+    } catch (error) { setConnectionStatus(error?.message || t("settingsLoadFailed"), "error"); }
+  }
+  function handleConnectionAction(event) {
+    const button = event.target.closest("button[data-connection-activate],button[data-connection-edit],button[data-connection-delete]");
+    if (!button) return;
+    if (button.dataset.connectionActivate) {
+      const id = button.dataset.connectionActivate,
+        closeAfterActivation = settingsConnectionQuickList?.contains(button) === true;
+      if (!settings.connections.some(connection => connection.id === id)) return;
+      localStorage.setItem(AI_CONNECTION_STORAGE_KEY, id);
+      syncLocalConnectionSelection();
+      renderConnectionLists();
+      setConnectionStatus(t("settingsConnectionActivated"), "success");
+      if (closeAfterActivation) closeSettings();
+      return;
+    }
+    const connection = settings.connections.find(item => item.id === button.dataset.connectionEdit || item.id === button.dataset.connectionDelete);
+    if (!connection) return;
+    if (button.dataset.connectionEdit) fillConnectionEditor(connection);
+    else if (window.confirm(t("settingsDeleteConfirm"))) void updateConnection("delete", connection.id);
+  }
   function updateSettingsPanel() {
     if (!settingsPanel) return;
     settingsAutoToggle.classList.toggle("on", state.auto);
     settingsAutoToggle.setAttribute("aria-checked", String(state.auto));
     summonToggle.classList.toggle("on", state.summonEnabled);
     summonToggle.setAttribute("aria-checked", String(state.summonEnabled));
+    settingsWidgetShadowToggle.classList.toggle("on", state.widgetShadowEnabled);
+    settingsWidgetShadowToggle.setAttribute("aria-checked", String(state.widgetShadowEnabled));
+    void loadCanvasSettings();
   }
   function openSettings() {
+    if (window.penechoDesktop?.openSettings) {
+      void window.penechoDesktop.openSettings();
+      return true;
+    }
     if (settings.open || !settingsLayer) return false;
     hideAutoDelayControl();
     hideEffortControl();
@@ -1364,6 +2006,14 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
     localStorage.setItem("penecho-summon-enabled", String(state.summonEnabled));
     if (!state.summonEnabled) hideSummon();
     updateSettingsPanel();
+  }
+  function setWidgetShadowEnabled(enabled) {
+    state.widgetShadowEnabled = Boolean(enabled);
+    localStorage.setItem("penecho-widget-shadow", String(state.widgetShadowEnabled));
+    view.classList.toggle("widget-shadows", state.widgetShadowEnabled);
+    settingsWidgetShadowToggle.classList.toggle("on", state.widgetShadowEnabled);
+    settingsWidgetShadowToggle.setAttribute("aria-checked", String(state.widgetShadowEnabled));
+    requestRender();
   }
   function maybeStartOnboarding() {
     if (!maybeStartFeatureTour()) maybeShowChangelog();
@@ -1590,7 +2240,7 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
         fixedDefinitionIds = new Set(["general", "flowchart", ...promotedDefinitions.map((definition) => definition.id)]),
         remainingDefinitions = definitions.filter((definition) => !fixedDefinitionIds.has(definition.id)),
         previousIds = new Set(dataPluginDefinitions().map((plugin) => plugin.id)), nextIds = new Set(definitions.map((plugin) => plugin.id));
-      if (state.activeAI?.widgetEdit || state.pendingWidgetReplacement) cancelWidgetRefinement("plugin-catalog-reloaded");
+      if (activeWidgetRefinement() || state.pendingWidgetReplacement) cancelWidgetRefinement("plugin-catalog-reloaded");
       for (const widget of [...state.widgets, ...(state.pendingWidget ? [state.pendingWidget] : [])]) unmountWidget(widget);
       PLUGIN_DEFINITIONS.splice(0, PLUGIN_DEFINITIONS.length, ...generalDefinitions, ...professionalDefinitions, ...BUILTIN_PLUGIN_DEFINITIONS, ...promotedDefinitions, ...remainingDefinitions);
       pluginManifests.clear();
@@ -2019,7 +2669,7 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       const response = await fetch("/api/plugins/improve", {
         method:"POST",
         credentials:"same-origin",
-        headers:authenticatedApiHeaders({ "Content-Type":"application/json" }),
+        headers:aiRequestHeaders({ "Content-Type":"application/json" }),
         body:JSON.stringify({ document, styles, reasoningEffort:state.reasoningEffort }),
       }), body = await pluginJsonResponse(response);
       if (typeof body?.document !== "string" || typeof body?.styles !== "string") throw Error("The AI response did not contain a complete plugin bundle");
@@ -2173,7 +2823,7 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
     requestRender();
   }
   function applyWidgetPluginState(pluginId, enabled) {
-    if (!enabled && state.activeAI?.widgetEdit?.pluginId === pluginId) cancelWidgetRefinement("widget-plugin-disabled");
+    if (!enabled && activeWidgetRefinement()?.pluginId === pluginId) cancelWidgetRefinement("widget-plugin-disabled");
     if (!enabled && state.pendingWidget?.pluginId === pluginId) rejectPendingWidget();
     if (!enabled && selectedWidget()?.pluginId === pluginId) acceptWidgetEdit();
     for (const widget of state.widgets) {
@@ -2248,8 +2898,11 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
     updateGridButton();
     updateHistorySaveFeedbackLanguage();
     renderSnapshotList();
+    renderConnectionLists();
     updateNewCanvasDialog();
-    if (state.statusKey) status.textContent = t(state.statusKey);
+    renderCanvasHint(false);
+    if (state.aiProgressEvent) setStatus(aiProgressText(state.aiProgressEvent),AI_PROGRESS_STATUS_KEYS[state.aiProgressEvent.phase]);
+    else if (state.statusKey) setStatusKey(state.statusKey);
     updateSelectionToolbar();
     updateFeatureTourLanguage();
     summonFX?.refreshText();
@@ -2266,7 +2919,9 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
   function updateEmbodimentLabel() {
     const label = t({ arcane: "guideArcane", scifi: "guideScifi", research: "guideResearch", studio: "guideStudio" }[state.theme]);
     embodiment.setAttribute("aria-label", label);
-    aiOrb.setAttribute("title", label);
+    const orbLabel = state.busy ? t("stopAIRequest") : t("openAIMenu");
+    aiOrb.setAttribute("aria-label", orbLabel);
+    aiOrb.setAttribute("title", orbLabel);
   }
   function updateFullscreenButton() {
     const button = document.querySelector("#fullscreenBtn");
@@ -2292,6 +2947,7 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
     button.setAttribute("title", label);
   }
   function applyTheme(theme) {
+    theme = normalizeTheme(theme);
     state.theme = theme;
     document.body.dataset.theme = theme;
     embodiment.dataset.theme = theme;
@@ -2309,8 +2965,17 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
     state.busy = Boolean(value);
     embodiment.classList.toggle("working", state.busy);
     embodiment.setAttribute("aria-busy", String(state.busy));
-    if (state.busy) showSummon();
-    else hideSummon();
+    aiOrb.setAttribute("aria-haspopup", state.busy ? "false" : "menu");
+    if (state.busy) {
+      state.radialGesture = null;
+      closeRadialMenu();
+      revealAIOrb();
+      showSummon();
+    } else {
+      hideSummon();
+      scheduleAIOrbIdle();
+    }
+    updateEmbodimentLabel();
   }
   function setNavigating(value) {
     clearTimeout(state.navigationTimer);
@@ -2322,6 +2987,20 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
     }, NAVIGATION_HINT_VISIBLE_MS);
   }
   function wheelNavigating() {
+    setNavigating(true);
+  }
+  function setCanvasNavigationLocked(locked) {
+    state.navigationLocked = Boolean(locked);
+    state.panGesture = null;
+    state.touchGesture = null;
+    const label = t(state.navigationLocked ? "canvasUnlockNavigation" : "canvasLockNavigation");
+    view.classList.toggle("navigation-locked", state.navigationLocked);
+    canvasNavigationLock.classList.toggle("locked", state.navigationLocked);
+    canvasNavigationLock.setAttribute("aria-pressed", String(state.navigationLocked));
+    canvasNavigationLock.setAttribute("aria-label", label);
+    canvasNavigationLock.setAttribute("title", label);
+    syncWidgetHostStates();
+    resetCanvasCursor();
     setNavigating(true);
   }
   function selectionAIRequest(selection = state.selection) {
@@ -2361,7 +3040,23 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
     supersedeActiveAI("manual-action");
     requestAI(action, null, { captureCurrentViewport: true });
   }
+  const AI_ORB_IDLE_DELAY_MS = 5000;
+  function revealAIOrb() {
+    clearTimeout(state.aiOrbIdleTimer);
+    state.aiOrbIdleTimer = 0;
+    embodiment.classList.remove("idle-dim");
+  }
+  function scheduleAIOrbIdle() {
+    revealAIOrb();
+    if (state.busy || embodiment.classList.contains("menu-open")) return;
+    state.aiOrbIdleTimer = setTimeout(() => {
+      state.aiOrbIdleTimer = 0;
+      if (!state.busy && !state.radialGesture && !embodiment.classList.contains("menu-open")) embodiment.classList.add("idle-dim");
+    }, AI_ORB_IDLE_DELAY_MS);
+  }
   function openRadialMenu() {
+    if (state.busy) return;
+    revealAIOrb();
     clearTimeout(state.radialCloseTimer);
     embodiment.classList.add("menu-open");
     aiOrb.setAttribute("aria-expanded", "true");
@@ -2377,6 +3072,7 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       button.classList.remove("is-highlighted");
       button.setAttribute("tabindex", "-1");
     });
+    if (!state.busy) scheduleAIOrbIdle();
   }
   function chooseRadialAction(clientX, clientY) {
     const orbRect = aiOrb.getBoundingClientRect(),
