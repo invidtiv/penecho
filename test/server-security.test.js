@@ -1539,6 +1539,10 @@ test("professional diagrams accept local source renderers and keep unknown forma
         diagramKind:"process",
         sourceFormat:"mermaid",
         source:"flowchart LR\nA --> B",
+        communityOriginItemId:"123e4567-e89b-42d3-a456-426614174099",
+        communityRootItemId:"123e4567-e89b-42d3-a456-426614174098",
+        communityOriginName:"Forged origin",
+        communityOriginGeneration:99,
       },
     };
     const refined = await fetch(`${running.origin}/api/ai/command`, {
@@ -1572,6 +1576,10 @@ test("professional diagrams accept local source renderers and keep unknown forma
     assert.equal(modelInput.widgetEdit.widgetType, "diagram_source");
     assert.equal("source" in modelInput.widgetEdit, false);
     assert.equal("html" in modelInput.widgetEdit, false);
+    for (const field of ["communityOriginItemId", "communityRootItemId", "communityOriginName", "communityOriginGeneration"]) {
+      assert.equal(field in modelInput.widgetEdit, false);
+      assert.doesNotMatch(files.find(file => file.path === "widget.json").content, new RegExp(field));
+    }
     assert.deepEqual(modelInput.widgetEdit.patchFiles, [{ path:"widget.json" },{ path:"widget.source" }]);
     assert.equal(modelInput.actionMeaning, "refine the supplied target widget in place using the newest instructions; return only the required widget_patch command");
     assert.match(modelInput.widgetEditPolicy, /widget_patch[\s\S]*?standard unified diff/);
@@ -2070,6 +2078,29 @@ test("personal plugins use the writable desktop directory and remain fetchable",
     const removed=await fetch(`${running.origin}/api/plugins/desktop-private-test`,{method:"DELETE",headers:{Origin:running.origin,Cookie:cookie}});
     assert.equal(removed.status,200);
     assert.equal(fs.existsSync(path.join(privateDirectory,"desktop-private-test")),false);
+  } finally {
+    await stopServer(running.child);
+    await new Promise(resolve=>upstream.server.close(resolve));
+  }
+});
+
+test("community metadata accepts an optional continuation prompt and validates the automatic WebP thumbnail", { timeout:20000 }, async () => {
+  const generated={name:"Solar System Learning Map",description:"A clear visual map for exploring planets and their relationships.",category:"education",tags:["solar system","planets","learning"],continuationPrompt:""},
+    upstream=await startApiServer(JSON.stringify(generated)),running=await startServer(apiServerEnv(upstream.origin)),image=await sharp({create:{width:96,height:64,channels:4,background:{r:35,g:92,b:155,alpha:1}}}).webp({quality:80}).toBuffer(),
+    payload={kind:"canvas",language:"en",preview:{contentType:"image/webp",width:96,height:64,dataBase64:image.toString("base64")},current:{name:"Map",description:"",category:"productivity",tags:[]},context:{title:"Map"}};
+  try {
+    const response=await fetch(`${running.origin}/api/community/metadata`,{method:"POST",headers:{Origin:running.origin,"Content-Type":"application/json","X-PenEcho-Connection":"default"},body:JSON.stringify(payload)}),body=await response.json();
+    assert.equal(response.status,200);
+    assert.deepEqual(body.metadata,generated);
+    assert.equal(upstream.requests.length,1);
+    const outbound=JSON.parse(upstream.requests[0]);
+    assert.match(outbound.messages[0].content,/public Craft metadata/);
+    assert.match(outbound.messages[1].content[1].image_url.url,/^data:image\/webp;base64,/);
+    assert.doesNotMatch(JSON.stringify(outbound),/priceCredits|apiKey/);
+
+    const invalid=await fetch(`${running.origin}/api/community/metadata`,{method:"POST",headers:{Origin:running.origin,"Content-Type":"application/json"},body:JSON.stringify({...payload,preview:{...payload.preview,width:97}})});
+    assert.equal(invalid.status,400);
+    assert.equal(upstream.requests.length,1);
   } finally {
     await stopServer(running.child);
     await new Promise(resolve=>upstream.server.close(resolve));

@@ -12,6 +12,8 @@
   const widgetRefineTouchCandidates = new Map();
   let widgetRefineConfirmationElement = null;
   let canvasWidgetGestureResetTap = null;
+  let viewerAutoFitWidgetId = null;
+  let viewerAutoFitCanvas = false;
   let nextObjectChromeStyleId = 1;
   function normalizedWidgetSource(value) {
     return typeof value === "string" ? value.replace(/\r\n/g, "\n").trim() : "";
@@ -185,9 +187,14 @@
     state.selectedTextBoxId = null;
     for (const item of Array.isArray(items) ? items.slice(0, MAX_VISIBLE_TEXT_BOXES) : []) {
       let record = null;
-      if (item?.image) {
-        record = textBoxHistoryRecord(item);
-      } else record = await renderedTextBoxRecord(item);
+      try {
+        if (item?.image) record = textBoxHistoryRecord(item);
+        else record = await renderedTextBoxRecord(item);
+      } catch {
+        // One invalid or unsupported text box must not make an otherwise valid
+        // saved Canvas impossible to restore.
+        continue;
+      }
       if (!record || state.textBoxes.some((existing) => existing.id === record.id)) continue;
       const numbered = /^text-box-(\d+)$/.exec(record.id);
       if (numbered) state.nextTextBoxId = Math.max(state.nextTextBoxId, Number(numbered[1]) + 1);
@@ -985,11 +992,16 @@
       contentH: widget.contentH,
       title: widget.title,
       refreshSeconds: widget.refreshSeconds,
+      ...(widget.favorite ? { favorite:true } : {}),
       ...(widget.widgetType === "diagram_source" ? { source:widget.source } : { html:widget.html }),
       ...(widget.diagramKind ? { diagramKind:widget.diagramKind } : {}),
       ...(widget.sourceFormat ? { sourceFormat:widget.sourceFormat } : {}),
       ...(widget.frameworkVersion ? { frameworkVersion:widget.frameworkVersion } : {}),
       ...(widget.widgetType !== "diagram_source" && widget.pluginId !== "image-search" && widget.copyText ? { copyText:widget.copyText, copyLabel:widget.copyLabel } : {}),
+      ...(widget.communityOriginItemId ? { communityOriginItemId:widget.communityOriginItemId } : {}),
+      ...(widget.communityRootItemId ? { communityRootItemId:widget.communityRootItemId } : {}),
+      ...(widget.communityOriginName ? { communityOriginName:widget.communityOriginName } : {}),
+      ...(Number.isInteger(widget.communityOriginGeneration) ? { communityOriginGeneration:widget.communityOriginGeneration } : {}),
     }));
   }
   function recordWidgetsBefore() {
@@ -1020,6 +1032,10 @@
     if (diagramKind.length > 80 || sourceFormat.length > 80 || frameworkVersion.length > 120) return null;
     if (widgetType !== "diagram_source" && allowCopy && item.copyText !== undefined && (typeof item.copyText !== "string" || !item.copyText.trim() || item.copyText.length > MAX_WIDGET_COPY_TEXT_LENGTH)) return null;
     if (widgetType !== "diagram_source" && allowCopy && item.copyLabel !== undefined && (typeof item.copyLabel !== "string" || !item.copyLabel.trim() || item.copyLabel.length > 80)) return null;
+    const communityOriginItemId = typeof item.communityOriginItemId === "string" && /^[0-9a-f-]{36}$/i.test(item.communityOriginItemId) ? item.communityOriginItemId : null,
+      communityRootItemId = typeof item.communityRootItemId === "string" && /^[0-9a-f-]{36}$/i.test(item.communityRootItemId) ? item.communityRootItemId : null,
+      communityOriginName = typeof item.communityOriginName === "string" ? item.communityOriginName.trim().slice(0, 160) : "",
+      communityOriginGeneration = Number.isInteger(item.communityOriginGeneration) && item.communityOriginGeneration >= 0 && item.communityOriginGeneration <= 100000 ? item.communityOriginGeneration : null;
     return {
       id: typeof item.id === "string" && /^widget-\d+$/.test(item.id) ? item.id : `widget-${state.nextWidgetId++}`,
       widgetType,
@@ -1047,6 +1063,13 @@
       hostOrigin: null,
       pending: false,
       runtimeDiagnostics: null,
+      communityOriginItemId,
+      communityRootItemId,
+      communityOriginName,
+      communityOriginGeneration,
+      favorite: item.favorite === true,
+      favoriteBusy: false,
+      favoritePendingVersion: null,
     };
   }
   function restoreWidgets(items) {
@@ -1070,16 +1093,94 @@
       if (pluginEnabled(widget.pluginId)) mountWidget(widget);
     }
   }
+  async function communityWidgetArtifact(widgetId) {
+    const widget = state.widgets.find((item) => item.id === widgetId);
+    if (!widget) throw Error("Select a Widget on the Canvas first.");
+    const serialized = serializedWidgets().find((item) => item.id === widget.id);
+    if (!serialized) throw Error("This Widget could not be prepared for sharing.");
+    const image = await requestWidgetSnapshot(widget, WIDGET_SNAPSHOT_TIMEOUT_MS, true),
+      maximum = 2048,
+      scale = Math.min(1, maximum / Math.max(1, image.naturalWidth || image.width), maximum / Math.max(1, image.naturalHeight || image.height)),
+      canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round((image.naturalWidth || image.width) * scale));
+    canvas.height = Math.max(1, Math.round((image.naturalHeight || image.height) * scale));
+    canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
+    const communityImages = await communityImagesForCanvas(canvas, .82);
+    canvas.width = canvas.height = 1;
+    const publicWidget = { ...serialized };
+    delete publicWidget.favorite;
+    return { format:"penecho-widget", formatVersion:1, widget:publicWidget, ...communityImages };
+  }
+  function setCommunityWidgetFavorite(widgetId, favorite, busy = false) {
+    const widget = state.widgets.find((item) => item.id === widgetId);
+    if (!widget) return false;
+    if (busy === true && !widget.favoriteBusy) widget.favoritePendingVersion = widget.contentVersion;
+    if (typeof favorite === "boolean") {
+      const changedWhileSaving = favorite === true
+        && Number.isInteger(widget.favoritePendingVersion)
+        && widget.favoritePendingVersion !== widget.contentVersion;
+      if (!changedWhileSaving) widget.favorite = favorite;
+    }
+    widget.favoriteBusy = busy === true;
+    if (!widget.favoriteBusy) widget.favoritePendingVersion = null;
+    syncObjectChrome();
+    return widget.favorite;
+  }
+
+  async function importCommunityWidgetArtifact(artifact, origin = null, options = null) {
+    if (!artifact || artifact.format !== "penecho-widget" || artifact.formatVersion !== 1 || !artifact.widget) throw Error("The community Widget is invalid.");
+    if (state.pendingWidget) acceptPendingWidget({ restoreMode:false });
+    if (state.widgetEdit) acceptWidgetEdit();
+    const visible = viewportRect(), source = { ...artifact.widget };
+    delete source.id;
+    // Fit the widget into the visible canvas: oversized widgets shrink
+    // uniformly (content scales through the shell transform) and land centered
+    // instead of spilling past the viewport edges.
+    const viewerFit = options?.fitViewport === true && window.PENECHO_CONFIG?.runtime === "viewer";
+    const fitScale = viewerFit ? 1 : Math.min(1, (visible.w * 0.9) / Number(source.w || 300) || 1, (visible.h * 0.9) / Number(source.h || 200) || 1);
+    if (!viewerFit && fitScale > 0 && fitScale < 1) { source.w = Number(source.w || 300) * fitScale; source.h = Number(source.h || 200) * fitScale; }
+    source.x = Math.max(0, Math.min(SIZE - Number(source.w || 300), visible.x + Math.max(0, (visible.w - Number(source.w || 300)) / 2)));
+    source.y = Math.max(0, Math.min(SIZE - Number(source.h || 200), visible.y + Math.max(0, (visible.h - Number(source.h || 200)) / 2)));
+    await enableSnapshotWidgetPlugins([source]);
+    const widget = widgetRecord(source);
+    if (!widget) throw Error("The community Widget is not compatible with this PenEcho version.");
+    if (origin?.id && /^[0-9a-f-]{36}$/i.test(origin.id)) {
+      widget.communityOriginItemId = origin.id;
+      widget.communityRootItemId = origin.rootItemId || origin.id;
+      widget.communityOriginName = String(origin.name || "").trim().slice(0, 160);
+      widget.communityOriginGeneration = Number.isInteger(origin.generation) && origin.generation >= 0 ? origin.generation : 0;
+    }
+    recordWidgetsBefore();
+    state.widgets.push(widget);
+    if (pluginEnabled(widget.pluginId)) mountWidget(widget);
+    if (viewerFit) {
+      viewerAutoFitCanvas = false;
+      viewerAutoFitWidgetId = widget.id;
+      fit();
+    }
+    state.userRevision++;
+    state.autoEligible = false;
+    save();
+    requestRender();
+    return { id:widget.id, title:widget.title };
+  }
   function widgetHostUrl(manifest) {
-    const url = new URL("widget-host.html", location.href);
-    if (url.hostname === "localhost") {
-      url.hostname = "127.0.0.1";
-      url.searchParams.set("parent-origin", location.origin);
-    } else if (url.hostname === "127.0.0.1") {
-      url.hostname = "localhost";
-      url.searchParams.set("parent-origin", location.origin);
+    const url = new URL(canvasAssetUrl("widget-host.html")),
+      runtime = window.PENECHO_CONFIG?.runtime;
+    // The editable local app isolates Widget code on the other loopback host.
+    // Cloud shells serve a host with frame-ancestors 'self', so changing only
+    // the hostname there would make the iframe cross-origin and CSP-blocked.
+    if (runtime !== "cloud" && runtime !== "viewer") {
+      if (url.hostname === "localhost") {
+        url.hostname = "127.0.0.1";
+        url.searchParams.set("parent-origin", location.origin);
+      } else if (url.hostname === "127.0.0.1") {
+        url.hostname = "localhost";
+        url.searchParams.set("parent-origin", location.origin);
+      }
     }
     if (configuredAccessSession) url.searchParams.set("access-session", configuredAccessSession);
+    if (runtime === "cloud") url.searchParams.set("remote-canvas", "1");
     for (const origin of manifest.connect) url.searchParams.append("connect", origin);
     return url.href;
   }
@@ -1107,6 +1208,9 @@
     frame.title = widget.title;
     frame.referrerPolicy = "no-referrer";
     frame.src = widgetHostUrl(manifest);
+    frame.addEventListener("load", () => {
+      if (widget.frame === frame) probeWidgetHost(widget);
+    });
     frame.addEventListener("pointerenter", (event) => {
       if (state.mode !== "hand" || event.pointerType === "touch") return;
       updateHandObjectHover(clientPoint(event));
@@ -1202,6 +1306,11 @@
     if (!widgetRuntimeEnabled()) return;
     for (const widget of [...state.widgets, ...(state.pendingWidget ? [state.pendingWidget] : [])]) positionWidget(widget);
   }
+  function probeWidgetHost(widget) {
+    if (!widget.frame?.contentWindow) return false;
+    widget.frame.contentWindow.postMessage({ type:"penecho-widget-host-probe" }, widget.hostOrigin || location.origin);
+    return true;
+  }
   function sendWidgetInit(widget) {
     if (!widget.frame?.contentWindow || !widget.hostReady || widget.initialized || widget.renderActive === false) return;
     const manifest = pluginManifests.get(widget.pluginId);
@@ -1222,6 +1331,13 @@
     if (!force && widget.hostStateKey === key) return;
     widget.hostStateKey = key;
     widget.frame.contentWindow.postMessage({ type:"penecho-widget-state", selected, active, navigationLocked:state.navigationLocked, scaleX, scaleY }, widget.hostOrigin || location.origin);
+  }
+  function markWidgetHostReady(widget) {
+    widget.hostReady = true;
+    widget.resolveHostReady?.();
+    widget.resolveHostReady = null;
+    sendWidgetInit(widget);
+    sendWidgetHostState(widget, undefined, undefined, true);
   }
   function syncWidgetHostStates() {
     for (const widget of [...state.widgets, ...(state.pendingWidget ? [state.pendingWidget] : [])]) sendWidgetHostState(widget);
@@ -1289,11 +1405,7 @@
     if (!widget || event.origin !== (widget.hostOrigin || location.origin) || !event.data || typeof event.data !== "object") return;
     const message = event.data;
     if (message.type === "penecho-widget-host-ready") {
-      widget.hostReady = true;
-      widget.resolveHostReady?.();
-      widget.resolveHostReady = null;
-      sendWidgetInit(widget);
-      sendWidgetHostState(widget, undefined, undefined, true);
+      markWidgetHostReady(widget);
       return;
     }
     if (message.type === "penecho-widget-capture-ready") {
@@ -1327,6 +1439,10 @@
     }
     if (message.type === "penecho-widget-updated") {
       widget.contentVersion++;
+      if (widget.favorite) {
+        widget.favorite = false;
+        syncObjectChrome();
+      }
       return;
     }
     if (!["penecho-widget-snapshot", "penecho-widget-snapshot-error"].includes(message.type)) return;
@@ -1771,9 +1887,8 @@
     setStatusKey("aiDone");
     return new Promise((resolve) => (widget.resolve = resolve));
   }
-  function startPendingWidgetReplacement(command, target, revision) {
-    if (state.pendingWidget || state.pendingWidgetReplacement || !target || !state.widgets.includes(target) || target.hiddenForReplacement || target.pluginId !== command.pluginId) return Promise.resolve(false);
-    const widget = widgetRecord({
+  function widgetReplacementRecordInput(command, target) {
+    return {
       ...command,
       id:target.id,
       x:target.x,
@@ -1782,7 +1897,16 @@
       h:target.h,
       contentW:target.contentW,
       contentH:target.contentH,
-    });
+      communityOriginItemId:target.communityOriginItemId,
+      communityRootItemId:target.communityRootItemId,
+      communityOriginName:target.communityOriginName,
+      communityOriginGeneration:target.communityOriginGeneration,
+      favorite:false,
+    };
+  }
+  function startPendingWidgetReplacement(command, target, revision) {
+    if (state.pendingWidget || state.pendingWidgetReplacement || !target || !state.widgets.includes(target) || target.hiddenForReplacement || target.pluginId !== command.pluginId) return Promise.resolve(false);
+    const widget = widgetRecord(widgetReplacementRecordInput(command, target));
     if (!widget || !pluginEnabled(widget.pluginId) || revision !== state.userRevision) return Promise.resolve(false);
     widget.pending = true;
     widget.revision = revision;
@@ -1878,13 +2002,19 @@
     return target?.kind === "confirmed" ? animationPlayhead(target.animation, now) : playbackPlayhead(target.scene, target.playback, now);
   }
   function serializedAnimations(now = performance.now()) {
-    return state.animations.map((animation) => ({
+    const current = state.animations.map((animation) => ({
       id: animation.id,
       rendererVersion: 1,
       transform: animationBox(animation),
       scene: ANIMATION.serialize(animation.scene),
       playback: { playheadMs: animationPlayhead(animation, now), paused: Boolean(animation.paused) },
     }));
+    if (current.length) return current;
+    try {
+      return JSON.parse(JSON.stringify(state.preservedSnapshotAnimations || []));
+    } catch {
+      return [];
+    }
   }
   function restoreAnimations(items) {
     clearHandToolbarTargets("animation");
@@ -1892,8 +2022,13 @@
     state.selectedAnimationId = null;
     state.animationEdit = null;
     hideAnimationControls();
-    // Legacy declarative animation scenes are intentionally no longer loaded.
-    // Keeping this tolerant hook lets snapshots from older releases open silently.
+    // Legacy declarative scenes are not executed by the current renderer, but they
+    // remain opaque round-trip data so loading and re-saving never destroys them.
+    try {
+      state.preservedSnapshotAnimations = JSON.parse(JSON.stringify(Array.isArray(items) ? items : []));
+    } catch {
+      state.preservedSnapshotAnimations = [];
+    }
     requestAnimationLayerRender();
   }
   function recordAnimationsBefore() {
@@ -2278,7 +2413,40 @@
     interactionLayer.width = screen.width;
     interactionLayer.height = screen.height;
     state.animationFullRedraw = true;
-    if (!state.viewInitialized && r.width > 0 && r.height > 0) {
+    const viewerWidget = viewerAutoFitWidgetId && state.widgets.find((widget) => widget.id === viewerAutoFitWidgetId),
+      viewerBounds = viewerWidget
+        ? widgetBox(viewerWidget)
+        : viewerAutoFitCanvas
+          ? unionLocalBounds(
+              unionLocalBounds(
+                unionLocalBounds(
+                  unionLocalBounds(visibleInkBounds({ x:0, y:0, w:SIZE, h:SIZE }), imageBounds()),
+                  textBoxBounds(),
+                ),
+                animationBounds(),
+              ),
+              widgetBounds(),
+            )
+          : null;
+    if (viewerBounds && r.width > 0 && r.height > 0) {
+      // A public Craft is the page's primary content, so frame either its one
+      // Widget or the complete Canvas bounds against the actual viewport
+      // instead of preserving the infinite Canvas' publishing-time zoom. The
+      // top inset keeps it clear of the read-only action bar; every
+      // ResizeObserver pass recomputes the frame for phones, tablets and
+      // resized desktop windows without changing the content's aspect ratio.
+      const viewerBar = document.querySelector(".viewer-topbar")?.getBoundingClientRect(),
+        sideInset = Math.max(12, Math.min(40, r.width * .035)),
+        topInset = Math.max(64, Math.min(r.height * .4, viewerBar ? viewerBar.bottom - r.top + 12 : r.height * .09)),
+        bottomInset = Math.max(12, Math.min(32, r.height * .035)),
+        availableWidth = Math.max(1, r.width - sideInset * 2),
+        availableHeight = Math.max(1, r.height - topInset - bottomInset),
+        nextScale = Math.max(.03, Math.min(2, availableWidth / Math.max(1, viewerBounds.w), availableHeight / Math.max(1, viewerBounds.h)));
+      state.scale = nextScale;
+      state.panX = sideInset + (availableWidth - viewerBounds.w * nextScale) / 2 - viewerBounds.x * nextScale;
+      state.panY = topInset + (availableHeight - viewerBounds.h * nextScale) / 2 - viewerBounds.y * nextScale;
+      state.viewInitialized = true;
+    } else if (!state.viewInitialized && r.width > 0 && r.height > 0) {
       state.scale = Math.max(0.03, Math.min(2, Math.max(r.width, r.height) / 10000 * INITIAL_VIEW_ZOOM));
       state.panX = (r.width - SIZE * state.scale) / 2;
       state.panY = (r.height - SIZE * state.scale) / 2;
@@ -2286,6 +2454,13 @@
     }
     updateCoordinates();
     requestRender();
+  }
+  function fitViewerCanvas() {
+    if (window.PENECHO_CONFIG?.runtime !== "viewer") return false;
+    viewerAutoFitWidgetId = null;
+    viewerAutoFitCanvas = true;
+    fit();
+    return true;
   }
   function renderPlacedContentLayer(region = null) {
     const d = devicePixelRatio || 1,
@@ -2964,6 +3139,8 @@
     cancel:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>',
     copy:'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>',
     refine:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 1.3 4.2L17.5 8.5l-4.2 1.3L12 14l-1.3-4.2-4.2-1.3 4.2-1.3L12 3Z"/><path d="m18.5 14 .7 2.3 2.3.7-2.3.7-.7 2.3-.7-2.3-2.3-.7 2.3-.7.7-2.3Z"/></svg>',
+    favorite:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.6 2.5 5.2 5.7.7-4.2 3.9 1.1 5.6L12 16.2 6.9 19l1.1-5.6-4.2-3.9 5.7-.7Z"/></svg>',
+    share:'<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="m8.2 10.8 7.6-4.5M8.2 13.2l7.6 4.5"/></svg>',
   });
   function screenObjectBox(box) {
     return {
@@ -2996,6 +3173,30 @@
       refineCandidate:options.refine,
       activate:(button) => void beginWidgetRefineConfirmation(options.refine, objectChromeAnchor(button)),
     });
+    if (options.community && window.PenEchoCommunityUI) {
+      const favoriteLabelKey = widget.favoriteBusy ? "favoriteWidgetSaving" : widget.favorite ? "unfavoriteWidget" : "favoriteWidget";
+      items.push({
+        key:`widget:${widget.id}:tool-favorite`,
+        kind:"favorite",
+        label:window.PenEchoCommunityUI.label?.(favoriteLabelKey) || "Favorite",
+        baseWidth:36,
+        iconOnly:true,
+        pressed:widget.favorite === true,
+        busy:widget.favoriteBusy === true,
+        activate:() => {
+          if (widget.favoriteBusy) return;
+          window.dispatchEvent(new CustomEvent("penecho:community-widget-action", { detail:{ action:"favorite", widgetId:widget.id } }));
+        },
+      });
+      items.push({
+        key:`widget:${widget.id}:tool-share`,
+        kind:"share",
+        label:window.PenEchoCommunityUI.label?.("shareWidget") || "Share",
+        baseWidth:36,
+        iconOnly:true,
+        activate:() => window.dispatchEvent(new CustomEvent("penecho:community-widget-action", { detail:{ action:"share", widgetId:widget.id } })),
+      });
+    }
     if (!items.length) return;
     const gap = 4,
       groupHorizontalWidth = items.reduce((sum, item) => sum + item.baseWidth, 0) + gap * (items.length - 1),
@@ -3096,6 +3297,8 @@
     if (kind === "cancel") return t("cancel");
     if (kind === "copy") return t("copyText");
     if (kind === "refine") return t("widgetRefine");
+    if (kind === "favorite") return window.PenEchoCommunityUI?.label?.("favoriteWidget") || "Favorite Widget";
+    if (kind === "share") return window.PenEchoCommunityUI?.label?.("shareWidget") || "Share Widget";
     return t("hand");
   }
   function widgetRefineConfirmationPosition(anchor, width, height, viewportWidth, viewportHeight) {
@@ -3242,7 +3445,7 @@
     button.type = "button";
     button.className = `object-chrome-button ${kind}`;
     button.dataset.objectChromeKey = key;
-    button.innerHTML = ["copy", "refine"].includes(kind) ? `${OBJECT_CHROME_ICONS[kind]}<span class="object-chrome-label"></span>${kind === "refine" ? '<span class="widget-refine-hint" hidden></span>' : ""}` : OBJECT_CHROME_ICONS[kind];
+    button.innerHTML = ["copy", "refine", "favorite", "share"].includes(kind) ? `${OBJECT_CHROME_ICONS[kind]}<span class="object-chrome-label"></span>${kind === "refine" ? '<span class="widget-refine-hint" hidden></span>' : ""}` : OBJECT_CHROME_ICONS[kind];
     ensureObjectChromeStyleRule(button);
     button.addEventListener("pointerdown", (event) => {
       event.preventDefault();
@@ -3262,7 +3465,7 @@
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      if (kind === "move") return;
+      if (kind === "move" || button.disabled) return;
       if (kind === "refine") triggerWidgetRefineClickPulse(button.penechoSpec?.refineCandidate?.widgetId);
       button.penechoSpec?.activate?.(button);
     });
@@ -3375,7 +3578,7 @@
         if (record.expanded && state.handToolbarActiveKey === key && state.widgetEdit?.id === handTarget.id && editWidget === handTarget) {
           specs.push({ key:`widget:${handTarget.id}:cancel`, kind:"cancel", box, activate:() => deleteWidget(handTarget), ...shared, priority:3 });
           specs.push({ key:`widget:${handTarget.id}:accept`, kind:"accept", box, activate:() => acceptWidgetEdit({ showHint:true }), ...shared, priority:3 });
-          addWidgetToolSpecs(specs, handTarget, { copy:true, handToolbar:true, handToolbarKey:key, handToolbarHiding:Boolean(record.hiding) });
+          addWidgetToolSpecs(specs, handTarget, { copy:true, community:true, handToolbar:true, handToolbarKey:key, handToolbarHiding:Boolean(record.hiding) });
         }
       }
     }
@@ -3403,17 +3606,25 @@
         declaration = (button.penechoStyleRule || ensureObjectChromeStyleRule(button))?.["style"];
       button.penechoSpec = spec;
       button.classList.toggle("widget-tool", Boolean(spec.widgetTool));
+      button.classList.toggle("icon-only", Boolean(spec.iconOnly));
       button.classList.toggle("solo-widget-tool", Boolean(spec.widgetTool && spec.groupItemCount === 1));
       button.classList.toggle("hand-toolbar-control", Boolean(spec.handToolbar));
       button.classList.toggle("hand-toolbar-hiding", Boolean(spec.handToolbar && spec.handToolbarHiding));
+      button.classList.toggle("is-favorite", Boolean(spec.kind === "favorite" && spec.pressed));
+      button.classList.toggle("loading", Boolean(spec.busy));
       button.classList.toggle("refine-no-input", Boolean(spec.refineCandidate?.instructionMode === "implicit-polish"));
       button.classList.toggle("refine-hovered", Boolean(spec.refineCandidate && widgetRefineHintHovered(spec.refineCandidate)));
       if (spec.widgetToolGroup) button.dataset.widgetToolGroup = spec.widgetToolGroup;
       else delete button.dataset.widgetToolGroup;
       button.setAttribute("aria-label", label);
+      button.disabled = Boolean(spec.busy);
+      if (spec.kind === "favorite") button.setAttribute("aria-pressed", String(Boolean(spec.pressed)));
+      else button.removeAttribute("aria-pressed");
+      if (spec.busy) button.setAttribute("aria-busy", "true");
+      else button.removeAttribute("aria-busy");
       if (spec.kind === "refine") button.removeAttribute("title");
       else button.title = label;
-      if (["copy", "refine"].includes(spec.kind)) button.querySelector(".object-chrome-label").textContent = label;
+      if (["copy", "refine", "favorite", "share"].includes(spec.kind)) button.querySelector(".object-chrome-label").textContent = label;
       if (spec.kind === "refine") {
         const hint = button.querySelector(".widget-refine-hint"),
           visible = widgetRefineHintVisible(spec.refineCandidate),

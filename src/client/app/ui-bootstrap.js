@@ -874,13 +874,14 @@
   document.querySelector("#historyBackdrop").onclick = closeHistoryPanel;
   document.querySelector("#historySaveCurrent").onclick = saveCurrentCanvas;
   document.querySelector("#historySave").onclick = saveSnapshotFromHistory;
-  document.querySelector("#historyNew").onclick = openNewCanvasDialog;
   document.querySelector("#historyProjectSelect").onchange = (event) => {
-    rememberSelectedServerProject(event.target.value);
+    if (state.snapshotLocation === "cloud") rememberSelectedCloudProject(event.target.value);
+    else rememberSelectedServerProject(event.target.value);
     renderSnapshotList();
   };
   document.querySelector("#newCanvasProjectSelect").onchange = (event) => {
-    rememberSelectedServerProject(event.target.value);
+    if (state.snapshotLocation === "cloud") rememberSelectedCloudProject(event.target.value);
+    else rememberSelectedServerProject(event.target.value);
     renderSnapshotList();
   };
   document.querySelector("#historyProjectCreate").onclick = openServerProjectDialog;
@@ -891,7 +892,6 @@
       if (projectDialog.dataset.busy !== "true" && projectDialog.open) projectDialog.close("cancel");
     };
   document.querySelector("#projectDialogClose").onclick = closeProjectDialog;
-  document.querySelector("#projectDialogCancel").onclick = closeProjectDialog;
   document.querySelector("#projectName").addEventListener("input", (event) => event.currentTarget.setCustomValidity(""));
   projectDialog.addEventListener("cancel", (event) => {
     if (projectDialog.dataset.busy === "true") event.preventDefault();
@@ -918,12 +918,7 @@
     pendingCanvasTransition = null;
     document.querySelector("#newCanvasDialog").close("cancel");
   };
-  document.querySelector("#newCanvasCancel").onclick = () => {
-    pendingCanvasTransition = null;
-    document.querySelector("#newCanvasDialog").close("cancel");
-  };
   document.querySelector("#textHelpClose").onclick = closeTextHelp;
-  document.querySelector("#textHelpDone").onclick = closeTextHelp;
   document.querySelector("#textHelpDialog").addEventListener("close", restoreTextEditorAfterHelp);
   document.querySelector("#newDiscard").onclick = discardCanvasTransition;
   document.querySelector("#newSaveCopy").onclick = () => completeNewCanvas("new");
@@ -1094,7 +1089,6 @@
   tourNextButton.addEventListener("click", nextFeatureTourStep);
   tourSkipButton.addEventListener("click", skipFeatureTour);
   changelogCloseButton.addEventListener("click", closeChangelog);
-  changelogDoneButton.addEventListener("click", closeChangelog);
   changelogLayer.addEventListener("pointerdown", (event) => {
     if (event.target === changelogLayer) closeChangelog();
   });
@@ -1118,6 +1112,7 @@
   settingsEditorCancel?.addEventListener("click", hideConnectionEditor);
   settingsConnectionList?.addEventListener("click", handleConnectionAction);
   settingsConnectionQuickList?.addEventListener("click", handleConnectionAction);
+  if (window.penechoDesktop) document.querySelector(".settings-links")?.remove();
   settingsProvider?.addEventListener("change", () => {
     updateSettingsProviderFields();
     selectDefaultConnectionEffort();
@@ -1233,13 +1228,31 @@
   });
 
   document.querySelectorAll(".radial-action").forEach((button) => button.setAttribute("tabindex", "-1"));
+  window.PenEchoCommunityCanvas = Object.freeze({
+    widgetArtifact:communityWidgetArtifact,
+    canvasArtifact:communityCanvasArtifact,
+    suggestMetadata:suggestCommunityMetadata,
+    importWidget:importCommunityWidgetArtifact,
+    setWidgetFavorite:setCommunityWidgetFavorite,
+    importCanvas:importCommunityCanvasArtifact,
+    viewCanvas:viewCommunityCanvasArtifact,
+    lineageForArtifact:communityLineageForArtifact,
+    markPublishedOrigin:markPublishedCommunityOrigin,
+  });
+  window.PenEchoCloudProjects = Object.freeze({
+    openHistory:openCloudProjectHistory,
+    openCanvas:openCloudCanvas,
+    confirmExternalOpen:confirmExternalCanvasOpen,
+  });
   setPluginTemplate("simple");
   applyLanguage();
   setWidgetShadowEnabled(state.widgetShadowEnabled);
   applyTheme(state.theme);
   resetCanvasCursor();
   loadPluginDocuments().catch(() => {});
-  refreshSnapshots().catch(() => {});
+  // The public viewer has no history UI and must never probe private/local
+  // snapshot APIs on the Cloud origin.
+  if (window.PENECHO_CONFIG?.runtime !== "viewer") refreshSnapshots().catch(() => {});
   fit();
   setNavigating(true);
   scheduleAIOrbIdle();

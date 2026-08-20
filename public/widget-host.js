@@ -21,7 +21,9 @@
       }
     })(),
     rendererUrl = new URL("widget-renderer.js", location.href).href,
-    publicFetchUrl = new URL("api/widget-fetch", location.href).href,
+    remoteCanvas = new URL(location.href).searchParams.get("remote-canvas") === "1",
+    cloudCsrf = remoteCanvas ? document.cookie.split(";").map(value => value.trim()).find(value => value.startsWith("penecho_csrf="))?.slice("penecho_csrf=".length) || "" : "",
+    publicFetchUrl = remoteCanvas ? new URL("/api/v1/remote-canvas/http?path=%2Fapi%2Fwidget-fetch", location.href).href : new URL("api/widget-fetch", location.href).href,
     connect = new URL(location.href).searchParams.getAll("connect"),
     inner = document.createElement("iframe");
   let initialized = false,
@@ -29,7 +31,6 @@
     forwardedDragPointer = null,
     queuedDragMove = null,
     dragMoveFrame = 0,
-    innerDocumentUrl = null,
     runtimeVersion = 0,
     innerDocumentReady = false,
     widgetState = { selected:false, active:true, navigationLocked:false, scaleX:1, scaleY:1 };
@@ -39,12 +40,6 @@
   inner.setAttribute("title", "Dynamic canvas widget");
   inner.addEventListener("load", forwardWidgetState);
   document.body.append(inner);
-  function releaseInnerDocumentUrl() {
-    if (!innerDocumentUrl) return;
-    URL.revokeObjectURL(innerDocumentUrl);
-    innerDocumentUrl = null;
-  }
-  addEventListener("pagehide", releaseInnerDocumentUrl, { once:true });
   function runtime(runtimeVersion) {
     const UPDATED = "penecho-widget-updated",
       DRAG_START = "penecho-widget-drag-start",
@@ -947,7 +942,7 @@
           method:"POST",
           credentials:"same-origin",
           cache:"no-store",
-          headers:{ "Content-Type":"application/json", ...(accessSession ? { "X-PenEcho-Session":accessSession } : {}) },
+          headers:{ "Content-Type":"application/json", ...(accessSession ? { "X-PenEcho-Session":accessSession } : {}), ...(cloudCsrf ? { "X-PenEcho-CSRF":decodeURIComponent(cloudCsrf) } : {}) },
           body:JSON.stringify({ url:message.url }),
         }),
         body = await response.arrayBuffer(),
@@ -1193,6 +1188,14 @@
   function forwardWidgetState() {
     inner.contentWindow?.postMessage({ type:"penecho-widget-state", ...widgetState }, "*");
   }
+  function announceWidgetHostReady() {
+    parent.postMessage({ type:"penecho-widget-host-ready" }, parentOrigin);
+  }
+  function respondToWidgetHostProbe(event) {
+    if (event.source !== parent || event.origin !== parentOrigin || event.data?.type !== "penecho-widget-host-probe") return false;
+    announceWidgetHostReady();
+    return true;
+  }
   function flushDragMove() {
     dragMoveFrame = 0;
     if (!queuedDragMove) return;
@@ -1221,6 +1224,7 @@
   }
 
   addEventListener("message", (event) => {
+    if (respondToWidgetHostProbe(event)) return;
     const message = event.data;
     if (event.source === parent && event.origin === parentOrigin) {
       if (message?.type === "penecho-widget-init") {
@@ -1232,9 +1236,9 @@
         innerDocumentReady = false;
         inner.title = String(message.title || "Dynamic canvas widget").slice(0, 120);
         parent.postMessage({ type:"penecho-widget-runtime-diagnostics", errors:[], truncated:false }, parentOrigin);
-        releaseInnerDocumentUrl();
-        innerDocumentUrl = URL.createObjectURL(new Blob([widgetDocument(message.html, message.pluginStyles || "", runtimeVersion)], { type:"text/html" }));
-        inner.src = innerDocumentUrl;
+        const documentSource = widgetDocument(message.html, message.pluginStyles || "", runtimeVersion);
+        inner.removeAttribute("src");
+        inner.srcdoc = documentSource;
       } else if (message?.type === "penecho-widget-state" && typeof message.selected === "boolean" && typeof message.active === "boolean"
         && Number.isFinite(message.scaleX) && message.scaleX > 0 && Number.isFinite(message.scaleY) && message.scaleY > 0) {
         widgetState = { selected:message.selected, active:message.active, navigationLocked:Boolean(message.navigationLocked), scaleX:message.scaleX, scaleY:message.scaleY };
@@ -1298,5 +1302,5 @@
     else if (validTouchMessage(message)) parent.postMessage(message, parentOrigin);
   });
 
-  parent.postMessage({ type: "penecho-widget-host-ready" }, parentOrigin);
+  announceWidgetHostReady();
 })();

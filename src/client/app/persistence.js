@@ -3,17 +3,28 @@
     SNAPSHOT_STORE = "snapshots",
     SNAPSHOT_TILE_STORE = "snapshot-tiles",
     SNAPSHOT_TILE_DECODE_BATCH_SIZE = 8,
-    SNAPSHOT_LOCATIONS = new Set(["device", "server"]),
+    SNAPSHOT_IMAGE_DECODE_BATCH_SIZE = 4,
+    SNAPSHOT_LOCATIONS = new Set(["device", "server", "cloud"]),
     SERVER_DEFAULT_PROJECT_ID = "uncategorized",
     SERVER_ALL_PROJECTS_ID = "all",
-    SERVER_PROJECT_SESSION_KEY = "penecho-selected-canvas-project";
+    SERVER_PROJECT_SESSION_KEY = "penecho-selected-canvas-project",
+    CLOUD_ALL_PROJECTS_ID = "all",
+    CLOUD_PROJECT_SESSION_KEY = "penecho-selected-cloud-project";
   let snapshotDbPromise = null,
     snapshotItems = [],
     snapshotSaveInProgress = false,
     snapshotListGeneration = 0,
     historyNoticeTimer = 0,
+    historyActivityTimer = 0,
+    snapshotListInProgress = false,
+    snapshotLoadInProgress = false,
+    snapshotLoadingId = null,
+    snapshotItemsLocation = null,
     serverCanvasProjects = [],
     selectedServerProjectId = storedServerProjectId(),
+    cloudCanvasProjects = [],
+    selectedCloudProjectId = storedCloudProjectId(),
+    cloudHistorySignInRequired = false,
     pendingCanvasTransition = null;
   function validServerProjectSelection(projectId) {
     return projectId === SERVER_DEFAULT_PROJECT_ID || projectId === SERVER_ALL_PROJECTS_ID || /^project-[a-zA-Z0-9-]{8,64}$/.test(projectId || "");
@@ -34,12 +45,48 @@
   function selectedServerSaveProjectId() {
     return selectedServerProjectId === SERVER_ALL_PROJECTS_ID ? SERVER_DEFAULT_PROJECT_ID : selectedServerProjectId;
   }
+  function validCloudProjectSelection(projectId) {
+    return projectId === CLOUD_ALL_PROJECTS_ID || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(projectId || "");
+  }
+  function storedCloudProjectId() {
+    try {
+      const projectId = sessionStorage.getItem(CLOUD_PROJECT_SESSION_KEY);
+      return validCloudProjectSelection(projectId) ? projectId : CLOUD_ALL_PROJECTS_ID;
+    } catch {
+      return CLOUD_ALL_PROJECTS_ID;
+    }
+  }
+  function rememberSelectedCloudProject(projectId) {
+    selectedCloudProjectId = validCloudProjectSelection(projectId) ? projectId : CLOUD_ALL_PROJECTS_ID;
+    try { sessionStorage.setItem(CLOUD_PROJECT_SESSION_KEY, selectedCloudProjectId); } catch {}
+    return selectedCloudProjectId;
+  }
+  function cloudDefaultProjectId() {
+    return cloudCanvasProjects.find((project) => project.systemKey === "uncategorized")?.id || cloudCanvasProjects[0]?.id || null;
+  }
+  function selectedCloudSaveProjectId() {
+    return selectedCloudProjectId === CLOUD_ALL_PROJECTS_ID ? cloudDefaultProjectId() : selectedCloudProjectId;
+  }
   function snapshotLocationLabel(location = state.snapshotLocation) {
-    return t(location === "server" ? "storagePenEchoServer" : "storageThisDevice");
+    return t(location === "server" ? "storagePenEchoServer" : location === "cloud" ? "storagePenEchoCloud" : "storageThisDevice");
+  }
+  function cloudHistoryCopy(key) {
+    return t({
+      title:"snapshotCloudSignInRequired",
+      description:"snapshotCloudSignInHint",
+      action:"openPenEchoCloud",
+      confirmExternalOpen:"openCloudCanvasUnsaved",
+    }[key] || key);
+  }
+  function cloudHistoryRequiresSignIn(error) {
+    // Only the connector's explicit session-invalid contract may turn Cloud
+    // History into a signed-out state. A generic 401 can come from a proxy or
+    // an unrelated request and must remain an ordinary recoverable error.
+    return String(error?.code || "") === "cloud_sign_in_required";
   }
   function updateSnapshotLocationUi() {
     const location = SNAPSHOT_LOCATIONS.has(state.snapshotLocation) ? state.snapshotLocation : "device",
-      descriptionKey = location === "server" ? "storagePenEchoServerDescription" : "storageThisDeviceDescription";
+      descriptionKey = location === "server" ? "storagePenEchoServerDescription" : location === "cloud" ? "storagePenEchoCloudDescription" : "storageThisDeviceDescription";
     document.querySelectorAll('input[name="historyStorageLocation"], input[name="newCanvasStorageLocation"]').forEach((input) => {
       input.checked = input.value === location;
     });
@@ -49,16 +96,31 @@
     }
     renderServerProjectUi();
   }
-  function setSnapshotLocation(location) {
+  function setSnapshotLocation(location, { refresh = true } = {}) {
     if (!SNAPSHOT_LOCATIONS.has(location) || state.snapshotLocation === location) {
       updateSnapshotLocationUi();
-      return;
+      return refresh ? refreshSnapshots() : Promise.resolve(false);
+    }
+    if (snapshotLoadInProgress) {
+      state.snapshotLoadGeneration++;
+      snapshotLoadInProgress = false;
+      snapshotLoadingId = null;
     }
     state.snapshotLocation = location;
     localStorage.setItem("penecho-snapshot-location", location);
+    snapshotItems = [];
+    snapshotItemsLocation = null;
+    if (location === "cloud") cloudCanvasProjects = [];
+    else if (location === "server") serverCanvasProjects = [];
     updateSnapshotLocationUi();
     updateNewCanvasDialog();
-    refreshSnapshots().catch((error) => setStatus(`${t("snapshotError")}${error.message}`));
+    renderSnapshotListLoading(location);
+    if (!refresh) return Promise.resolve(true);
+    const request = refreshSnapshots();
+    request.catch((error) => {
+      if (location !== "cloud" || !cloudHistoryRequiresSignIn(error)) setStatus(`${t("snapshotError")}${error.message}`);
+    });
+    return request;
   }
   function updateHistorySaveFeedbackLanguage() {
     const button = document.querySelector("#historySave"),
@@ -88,6 +150,53 @@
   function showHistoryNoticeKey(key, tone = "info", duration = 2800) {
     showHistoryNotice(t(key), tone, { messageKey: key, duration });
   }
+  function setHistoryActivity(text, detail = "", progress = null, tone = "busy") {
+    const activity = document.querySelector("#historyActivity"),
+      title = document.querySelector("#historyActivityTitle"),
+      description = document.querySelector("#historyActivityDetail"),
+      bar = document.querySelector("#historyActivityProgress");
+    if (!activity || !title || !description || !bar) return;
+    clearTimeout(historyActivityTimer);
+    activity.hidden = false;
+    activity.dataset.tone = tone;
+    title.textContent = text;
+    description.textContent = detail;
+    if (Number.isFinite(progress)) bar.value = Math.max(0, Math.min(100, progress));
+    else bar.removeAttribute("value");
+  }
+  function snapshotByteLabel(bytes) {
+    if (!Number.isFinite(bytes) || bytes <= 0) return "";
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10240 ? 1 : 0)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  function hideHistoryActivity(delay = 0) {
+    clearTimeout(historyActivityTimer);
+    const hide = () => {
+      const activity = document.querySelector("#historyActivity");
+      if (activity && !snapshotListInProgress && !snapshotLoadInProgress) activity.hidden = true;
+    };
+    if (delay > 0) historyActivityTimer = setTimeout(hide, delay);
+    else hide();
+  }
+  function historyBusy() { return snapshotSaveInProgress || snapshotListInProgress || snapshotLoadInProgress; }
+  function updateHistoryReadControls() {
+    const busy = historyBusy(), cloudBlocked = state.snapshotLocation === "cloud" && cloudHistorySignInRequired,
+      panel = document.querySelector("#historyPanel");
+    if (panel) panel.setAttribute("aria-busy", String(snapshotListInProgress || snapshotLoadInProgress));
+    document.querySelectorAll('input[name="historyStorageLocation"]').forEach((control) => (control.disabled = snapshotSaveInProgress));
+    document.querySelectorAll('#historyProjectSelect, #historyProjectCreate, #historyProjectDelete, #historyName, #historySaveCurrent, #historySave').forEach((control) => (control.disabled = busy || cloudBlocked));
+    const topSave = document.querySelector("#saveCanvasBtn");
+    if (topSave) topSave.disabled = snapshotSaveInProgress || cloudBlocked;
+    document.querySelectorAll(".history-load, .history-delete, .history-move").forEach((control) => (control.disabled = busy));
+    document.querySelectorAll(".history-card").forEach((card) => card.classList.toggle("loading", snapshotLoadInProgress && card.dataset.snapshotId === snapshotLoadingId));
+    document.querySelectorAll(".history-load").forEach((button) => {
+      const active = snapshotLoadInProgress && button.dataset.snapshotId === snapshotLoadingId;
+      button.textContent = t(active ? "snapshotLoadingShort" : "loadSnapshot");
+      if (active) button.setAttribute("aria-busy", "true");
+      else button.removeAttribute("aria-busy");
+    });
+  }
   function setHistorySaveBusy(busy) {
     const button = document.querySelector("#historySave"),
       currentButton = document.querySelector("#historySaveCurrent"),
@@ -110,9 +219,8 @@
       saveButton.classList.toggle("is-saving", busy);
       saveButton.setAttribute("aria-busy", String(busy));
     }
-    document.querySelectorAll('input[name="historyStorageLocation"]').forEach((input) => (input.disabled = busy));
-    document.querySelectorAll("#serverProjectManager button, #serverProjectManager select").forEach((control) => (control.disabled = busy));
     if (!busy) renderServerProjectUi();
+    updateHistoryReadControls();
   }
   async function saveSnapshotFromHistory() {
     if (snapshotSaveInProgress) return;
@@ -171,6 +279,74 @@
   function canvasBlob(canvas, type = "image/png", quality) {
     return new Promise((resolve, reject) => canvas.toBlob((blob) => (blob ? resolve(blob) : reject(Error("Could not encode canvas"))), type, quality));
   }
+  function communityCanvasHasContent(canvas) {
+    const sample=document.createElement("canvas"),width=Math.min(64,canvas.width),height=Math.min(64,canvas.height);
+    sample.width=Math.max(1,width);
+    sample.height=Math.max(1,height);
+    const context=sample.getContext("2d",{willReadFrequently:true});
+    context.drawImage(canvas,0,0,sample.width,sample.height);
+    const pixels=context.getImageData(0,0,sample.width,sample.height).data;
+    sample.width=sample.height=1;
+    let visible=0,nonWhite=0,min=255,max=0;
+    for(let offset=0;offset<pixels.length;offset+=4){
+      const alpha=pixels[offset+3];
+      if(alpha<12)continue;
+      visible++;
+      const luminance=(pixels[offset]*299+pixels[offset+1]*587+pixels[offset+2]*114)/1000;
+      min=Math.min(min,luminance);
+      max=Math.max(max,luminance);
+      if(luminance<246)nonWhite++;
+    }
+    return visible>0&&(nonWhite>0||max-min>5);
+  }
+  async function communityImageForCanvas(canvas,{maximumBytes,initialQuality}) {
+    if(!(canvas instanceof HTMLCanvasElement)||!Number.isInteger(canvas.width)||!Number.isInteger(canvas.height)
+      ||canvas.width<1||canvas.height<1||canvas.width>2048||canvas.height>2048)throw Error("The generated community image must be between 1 and 2048 pixels on each side.");
+    if(!communityCanvasHasContent(canvas))throw Error("The generated community image does not contain visible content.");
+    const qualities=[initialQuality,.78,.70,.62,.54,.46,.38];
+    for (const quality of qualities) {
+      const blob=await canvasBlob(canvas,"image/webp",quality);
+      if (blob.type !== "image/webp") throw Error("This browser could not create the required WebP community preview.");
+      if (blob.size<=maximumBytes) {
+        const decoded=await imageFromBlob(blob),width=decoded.naturalWidth||decoded.width,height=decoded.naturalHeight||decoded.height;
+        if(width!==canvas.width||height!==canvas.height)throw Error("The generated WebP image failed dimension validation.");
+        const dataUrl=await blobDataUrl(blob);
+        return { contentType:"image/webp",width,height,dataBase64:dataUrl.split(",",2)[1] };
+      }
+    }
+    throw Error("This preview is too detailed to share. Simplify the view or zoom out, then try again.");
+  }
+  async function communityImagesForCanvas(canvas,initialQuality=.82) {
+    const preview=await communityImageForCanvas(canvas,{maximumBytes:4*1024*1024,initialQuality}),maximum=1200,
+      scale=Math.min(1,maximum/canvas.width,maximum/canvas.height),thumbnailCanvas=document.createElement("canvas");
+    thumbnailCanvas.width=Math.max(1,Math.round(canvas.width*scale));
+    thumbnailCanvas.height=Math.max(1,Math.round(canvas.height*scale));
+    thumbnailCanvas.getContext("2d").drawImage(canvas,0,0,thumbnailCanvas.width,thumbnailCanvas.height);
+    const thumbnail=await communityImageForCanvas(thumbnailCanvas,{maximumBytes:768*1024,initialQuality:.78});
+    thumbnailCanvas.width=thumbnailCanvas.height=1;
+    const socialCanvas=document.createElement("canvas"),socialWidth=1200,socialHeight=630,padding=24;
+    socialCanvas.width=socialWidth;
+    socialCanvas.height=socialHeight;
+    const socialContext=socialCanvas.getContext("2d"),socialScale=Math.min(
+      (socialWidth-padding*2)/canvas.width,
+      (socialHeight-padding*2)/canvas.height,
+    ),drawWidth=Math.max(1,Math.round(canvas.width*socialScale)),drawHeight=Math.max(1,Math.round(canvas.height*socialScale));
+    socialContext.fillStyle="#f8fafc";
+    socialContext.fillRect(0,0,socialWidth,socialHeight);
+    socialContext.drawImage(canvas,Math.round((socialWidth-drawWidth)/2),Math.round((socialHeight-drawHeight)/2),drawWidth,drawHeight);
+    const socialBlob=await canvasBlob(socialCanvas,"image/png"),socialImage=await imageFromBlob(socialBlob);
+    if(socialBlob.type!=="image/png"||socialBlob.size>5*1024*1024
+      ||(socialImage.naturalWidth||socialImage.width)!==socialWidth||(socialImage.naturalHeight||socialImage.height)!==socialHeight){
+      throw Error("The generated social card failed validation.");
+    }
+    const socialDataUrl=await blobDataUrl(socialBlob);
+    socialCanvas.width=socialCanvas.height=1;
+    return {
+      communityPreview:preview,
+      communityThumbnail:thumbnail,
+      communitySocialCard:{contentType:"image/png",width:socialWidth,height:socialHeight,dataBase64:socialDataUrl.split(",",2)[1]},
+    };
+  }
   function requestResult(request) {
     return new Promise((resolve, reject) => {
       request.onsuccess = () => resolve(request.result);
@@ -214,10 +390,41 @@
       return dataUrlBlob("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
     }
   }
-  async function snapshotApiResponse(response) {
+  async function cloudSnapshotPreviewBlob() {
+    const canvas = snapshotPreview();
+    try {
+      for (const quality of [.78, .66, .54, .42]) {
+        const blob = await canvasBlob(canvas, "image/webp", quality);
+        if (blob.type === "image/webp" && blob.size <= 512 * 1024) return blob;
+      }
+      throw Error("The Cloud preview is too detailed. Zoom out or simplify the visible Canvas, then save again.");
+    } finally {
+      canvas.width = canvas.height = 1;
+    }
+  }
+  async function snapshotJsonBody(response, onProgress) {
+    if (typeof onProgress !== "function" || !response.body?.getReader) return response.json();
+    const total = Number(response.headers.get("content-length")) || 0,
+      reader = response.body.getReader(), chunks = [];
+    let received = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.byteLength;
+      onProgress(total > 0 ? Math.min(1, received / total) : null, received, total);
+    }
+    return JSON.parse(await new Blob(chunks, { type:"application/json" }).text());
+  }
+  async function snapshotApiResponse(response, onProgress = null) {
     let body = null;
-    try { body = await response.json(); } catch {}
-    if (!response.ok) throw Error(body?.error || `PenEcho server returned HTTP ${response.status}`);
+    try { body = await snapshotJsonBody(response, onProgress); } catch {}
+    if (!response.ok) {
+      const error = Error(body?.error || `PenEcho server returned HTTP ${response.status}`);
+      error.status = response.status;
+      error.code = body?.code || null;
+      throw error;
+    }
     return body;
   }
   async function serverSnapshotItems() {
@@ -235,8 +442,20 @@
       preview:dataUrlBlob(item.preview),
     }))).then((items) => items.sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt)));
   }
+  async function cloudSnapshotItems() {
+    const response = await fetch("/api/cloud/library", { credentials:"same-origin", cache:"no-store", headers:authenticatedApiHeaders() }),
+      body = await snapshotApiResponse(response);
+    if (body?.sync?.bundleVersion !== 2 || body.sync.conflictPolicy !== "base-revision-required") throw Error("PenEcho Cloud does not support this Canvas sync version");
+    cloudCanvasProjects = Array.isArray(body.projects) ? body.projects : [];
+    const selectedExists = selectedCloudProjectId === CLOUD_ALL_PROJECTS_ID || cloudCanvasProjects.some((project) => project.id === selectedCloudProjectId);
+    if (!selectedExists) rememberSelectedCloudProject(cloudDefaultProjectId() || CLOUD_ALL_PROJECTS_ID);
+    return (Array.isArray(body.canvases) ? body.canvases : []).map((item) => ({
+      ...item,
+      preview:typeof item.previewDataUrl === "string" && item.previewDataUrl ? dataUrlBlob(item.previewDataUrl) : null,
+    })).sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt));
+  }
   async function snapshotsAt(location) {
-    return location === "server" ? serverSnapshotItems() : allSnapshots();
+    return location === "server" ? serverSnapshotItems() : location === "cloud" ? cloudSnapshotItems() : allSnapshots();
   }
   function animationBounds(region = null) {
     if (!pluginEnabled("animation")) return null;
@@ -248,8 +467,8 @@
     }
     return bounds;
   }
-  function snapshotPreview() {
-    const preview = offscreen(640, 426),
+  function snapshotPreview(width = 640, height = 426) {
+    const preview = offscreen(width, height),
       q = preview.getContext("2d"),
       bounds = unionLocalBounds(unionLocalBounds(unionLocalBounds(unionLocalBounds(visibleInkBounds({ x:0, y:0, w:SIZE, h:SIZE }), imageBounds()), textBoxBounds()), animationBounds()), widgetBounds());
     q.fillStyle = state.paint.paper;
@@ -413,9 +632,10 @@
   function waitForSnapshotTileFrame() {
     return new Promise((resolve) => requestAnimationFrame(() => resolve()));
   }
-  async function decodeSnapshotTilesInBatches(tileEntries, isCurrent) {
+  async function decodeSnapshotTilesInBatches(tileEntries, isCurrent, onProgress = null) {
     const decodedTiles = new Map();
     try {
+      if (!tileEntries.length) onProgress?.(1);
       for (let start = 0; start < tileEntries.length; start += SNAPSHOT_TILE_DECODE_BATCH_SIZE) {
         const end = Math.min(tileEntries.length, start + SNAPSHOT_TILE_DECODE_BATCH_SIZE),
           batch = await Promise.all(tileEntries.slice(start, end).map(async ({ k, blob }) => ({ k, image:await imageFromBlob(blob) })));
@@ -433,6 +653,7 @@
           if (previous) previous.width = previous.height = 1;
           decodedTiles.set(k, canvas);
         }
+        onProgress?.(end / tileEntries.length);
         // Drop this batch's decoded image references before yielding. The tile
         // canvases retain the pixels needed for the atomic swap below.
         batch.length = 0;
@@ -449,6 +670,25 @@
       releaseSnapshotTileCanvases(decodedTiles);
       throw error;
     }
+  }
+  async function decodeSnapshotImagesInBatches(items, isCurrent, onProgress = null) {
+    const source = Array.isArray(items) ? items.slice(0, MAX_VISIBLE_IMAGES) : [], decoded = [];
+    if (!source.length) {
+      onProgress?.(1);
+      return decoded;
+    }
+    for (let start = 0; start < source.length; start += SNAPSHOT_IMAGE_DECODE_BATCH_SIZE) {
+      const end = Math.min(source.length, start + SNAPSHOT_IMAGE_DECODE_BATCH_SIZE),
+        batch = (await Promise.all(source.slice(start, end).map(decodeStoredImage))).filter(Boolean);
+      if (!isCurrent()) return null;
+      decoded.push(...batch);
+      onProgress?.(end / source.length);
+      if (end < source.length) {
+        await waitForSnapshotTileFrame();
+        if (!isCurrent()) return null;
+      }
+    }
+    return decoded;
   }
   async function finalizeCanvasForSnapshot() {
     if (state.pendingWidget) acceptPendingWidget({ restoreMode:false });
@@ -477,6 +717,22 @@
     if (!match) throw Error("Could not encode canvas bundle asset");
     return { kind, contentType:match[1], metadata, dataBase64:match[2] };
   }
+  function snapshotExtensionObject(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    try {
+      return JSON.parse(JSON.stringify(value));
+    } catch {
+      return {};
+    }
+  }
+  function snapshotPreservedAssets(value) {
+    if (!Array.isArray(value)) return [];
+    try {
+      return JSON.parse(JSON.stringify(value));
+    } catch {
+      return [];
+    }
+  }
   function snapshotBundleAssetBlob(asset) {
     if (!asset || typeof asset.contentType !== "string" || typeof asset.dataBase64 !== "string") throw Error("Canvas bundle contains an invalid asset");
     return dataUrlBlob(`data:${asset.contentType};base64,${asset.dataBase64}`);
@@ -493,7 +749,7 @@
       bundleVersion:2,
       mode:"snapshot",
       formatVersion:1,
-      extensions:{},
+      extensions:snapshotExtensionObject(item.bundleExtensions),
       id:item.id,
       createdAt:item.createdAt,
       updatedAt:item.updatedAt,
@@ -509,10 +765,216 @@
         animations:item.animations,
         textBoxes:item.textBoxes,
         savedAt:new Date(item.updatedAt).toISOString(),
-        extensions:{},
+        extensions:snapshotExtensionObject(item.manifestExtensions),
       },
-      assets:[...tileAssets, ...widgetAssets, ...imageAssets, previewAsset],
+      assets:[...snapshotPreservedAssets(item.preservedAssets), ...tileAssets, ...widgetAssets, ...imageAssets, previewAsset],
     };
+  }
+  async function communityCanvasArtifact(name = "") {
+    if (selectionAIBusy()) throw Error(t(selectionAIStatusKey()));
+    await finalizeCanvasForSnapshot();
+    if (!tiles.size && !state.images.length && !state.textBoxes.length && !state.preservedSnapshotAnimations.length && (!pluginEnabled("animation") || !state.animations.length) && !visibleWidgets().length) throw Error(t("emptyCanvas"));
+    await prepareVisibleWidgetSnapshots(null, false);
+    const previewCanvas=snapshotPreview(2048,1365),communityImages=await communityImagesForCanvas(previewCanvas,.78);
+    previewCanvas.width=previewCanvas.height=1;
+    const stamp=Date.now(),animations=serializedAnimations(),widgets=serializedWidgets(),textBoxes=storedTextBoxes(),images=storedImages(),
+      tileEntries=await Promise.all([...tiles].map(async ([k, canvas]) => ({ k, blob:await canvasBlob(canvas) }))),
+      preview=await snapshotPreviewBlob(),item={
+        version:2,
+        id:`community-${crypto.randomUUID?.() || stamp}`,
+        createdAt:stamp,
+        updatedAt:stamp,
+        name:String(name || state.currentSnapshotName || "").trim().slice(0, 160),
+        projectId:null,
+        theme:state.theme,
+        view:{ scale:state.scale, panX:state.panX, panY:state.panY, navigationLocked:state.navigationLocked },
+        animations,
+        widgets,
+        textBoxes,
+        images,
+        preview,
+        bundleExtensions:snapshotExtensionObject(state.currentSnapshotBundleExtensions),
+        manifestExtensions:snapshotExtensionObject(state.currentSnapshotManifestExtensions),
+    };
+    return { ...(await serverSnapshotPayload(item, tileEntries)), ...communityImages };
+  }
+  async function suggestCommunityMetadata({kind,artifact,current={}}) {
+    const preview=artifact?.communityThumbnail||artifact?.communityPreview;
+    if(!["widget","canvas"].includes(kind)||!preview)throw Error("Prepare the automatic share preview before using AI auto-fill.");
+    const response=await fetch("/api/community/metadata",{
+      method:"POST",
+      credentials:"same-origin",
+      headers:aiRequestHeaders({"Content-Type":"application/json"}),
+      body:JSON.stringify({
+        kind,
+        preview,
+        language:document.documentElement.lang==="zh"?"zh":"en",
+        current:{
+          name:String(current.name||"").slice(0,160),
+          description:String(current.description||"").slice(0,1200),
+          category:String(current.category||"productivity"),
+          tags:Array.isArray(current.tags)?current.tags.slice(0,8):[],
+          continuationPrompt:String(current.continuationPrompt||"").slice(0,500),
+        },
+        context:kind==="widget"?{title:String(artifact?.widget?.title||"").slice(0,120),pluginId:String(artifact?.widget?.pluginId||"").slice(0,64)}:{title:String(artifact?.name||"").slice(0,160)},
+      }),
+    }),body=await response.json().catch(()=>({}));
+    if(!response.ok)throw Error(body.error||`AI auto-fill failed (HTTP ${response.status}).`);
+    return body.metadata;
+  }
+  async function importCommunityCanvasArtifact(artifact, origin = null) {
+    const parsed = await readSnapshotBundle(artifact),stamp=Date.now(),id=`community-${crypto.randomUUID?.() || stamp}`,
+      item={ ...parsed.item,id,createdAt:stamp,updatedAt:stamp,name:String(parsed.item.name || "Community Canvas").slice(0,160),projectId:null };
+    if (origin?.id && /^[0-9a-f-]{36}$/i.test(origin.id)) {
+      item.bundleExtensions = {
+        ...snapshotExtensionObject(item.bundleExtensions),
+        penechoCommunity:{
+          originItemId:origin.id,
+          rootItemId:origin.rootItemId || origin.id,
+          originName:String(origin.name || "").trim().slice(0, 160),
+          originGeneration:Number.isInteger(origin.generation) && origin.generation >= 0 ? origin.generation : 0,
+        },
+      };
+    }
+    await saveDeviceSnapshot(item, parsed.tileEntries, null);
+    // The imported public Canvas now has an explicit device identity. Load it
+    // through that read-only store path instead of refreshing the currently
+    // selected History location (which may be Cloud and unrelated to import).
+    await requestLoadSnapshot(id, "device");
+    return { id, name:item.name };
+  }
+
+  // The public Viewer is presentation runtime, not an import workflow. Restore
+  // the published bundle directly into memory so opening a shared link never
+  // writes duplicate snapshots into IndexedDB, refreshes the private history
+  // library, or depends on editable-Canvas dialogs. Viewer CSS and the hand
+  // tool keep the restored objects read-only while fitViewerCanvas() frames
+  // the complete artifact instead of its publishing-time pan/zoom.
+  async function viewCommunityCanvasArtifact(artifact) {
+    if (window.PENECHO_CONFIG?.runtime !== "viewer") throw Error("Read-only Canvas viewing is unavailable in this runtime.");
+    const parsed = await readSnapshotBundle(artifact),
+      { item, tileEntries } = parsed,
+      loadGeneration = ++state.snapshotLoadGeneration,
+      loadIsCurrent = () => loadGeneration === state.snapshotLoadGeneration;
+    if (item.widgets?.length) {
+      if (!state.pluginCatalogLoaded && !state.pluginCatalogLoading) await loadPluginDocuments();
+      const catalogDeadline = Date.now() + 15000;
+      while (state.pluginCatalogLoading && Date.now() < catalogDeadline) await new Promise((resolve) => setTimeout(resolve, 40));
+      const missingPlugin = item.widgets.find((widget) => !pluginManifests.has(widget?.pluginId));
+      if (missingPlugin) throw Error(`The read-only Canvas needs the unavailable ${missingPlugin.pluginId || "Widget"} plugin.`);
+    }
+    await enableSnapshotWidgetPlugins(item.widgets);
+    let decodedTiles = null;
+    try {
+      const [tileResult, imageResult] = await Promise.allSettled([
+        decodeSnapshotTilesInBatches(tileEntries, loadIsCurrent).then((value) => (decodedTiles = value)),
+        decodeSnapshotImagesInBatches(item.images, loadIsCurrent),
+      ]);
+      if (tileResult.status === "rejected") throw tileResult.reason;
+      if (imageResult.status === "rejected") throw imageResult.reason;
+      if (!decodedTiles || !imageResult.value || !loadIsCurrent()) throw Error("The read-only Canvas load was superseded.");
+
+      if (state.selection) cancelSelection(true);
+      clearTextEditors();
+      state.userRevision++;
+      invalidateRecognition();
+      cancelPendingForRevision();
+      for (const canvas of tiles.values()) canvas.width = canvas.height = 1;
+      tiles.clear();
+      clearSharpOverlays();
+      state.inkBounds.clear();
+      state.history = [];
+      state.future = [];
+      state.animationHistoryBefore = null;
+      state.widgetHistoryBefore = null;
+      state.historyBefore.clear();
+      state.imageHistoryBefore = null;
+      state.textBoxHistoryBefore = null;
+      for (const [key, canvas] of decodedTiles) tiles.set(key, canvas);
+      decodedTiles.clear();
+      restoreAnimations(item.animations);
+      restoreWidgets(item.widgets);
+      applyTheme(item.theme);
+      restoreImages(imageResult.value);
+      await restoreTextBoxes(item.textBoxes);
+      if (!loadIsCurrent()) throw Error("The read-only Canvas load was superseded.");
+
+      // A viewer URL does not own a local snapshot. Preserve artifact extension
+      // metadata for rendering, but keep the editable storage identity empty.
+      state.currentSnapshotId = null;
+      state.currentSnapshotName = String(item.name || "").slice(0, 160);
+      state.currentSnapshotLocation = null;
+      state.currentSnapshotProjectId = null;
+      state.currentSnapshotRevisionId = null;
+      state.currentSnapshotBundleExtensions = snapshotExtensionObject(item.bundleExtensions);
+      state.currentSnapshotManifestExtensions = snapshotExtensionObject(item.manifestExtensions);
+      state.currentSnapshotPreservedAssets = snapshotPreservedAssets(item.preservedAssets);
+      state.dirty = null;
+      state.snapshotSavedRevision = state.userRevision;
+      setCanvasNavigationLocked(false);
+      closeHistoryPanel();
+      fitViewerCanvas();
+      render();
+      return { id:String(item.id || ""), name:state.currentSnapshotName };
+    } catch (error) {
+      if (decodedTiles?.size) releaseSnapshotTileCanvases(decodedTiles);
+      throw error;
+    }
+  }
+
+  function communityLineageForArtifact(kind, artifact) {
+    const lineage = kind === "widget"
+      ? {
+          originItemId:artifact?.widget?.communityOriginItemId,
+          rootItemId:artifact?.widget?.communityRootItemId,
+          originName:artifact?.widget?.communityOriginName,
+          originGeneration:artifact?.widget?.communityOriginGeneration,
+        }
+      : artifact?.extensions?.penechoCommunity;
+    return lineage && /^[0-9a-f-]{36}$/i.test(String(lineage.originItemId || ""))
+      ? {
+          parentItemId:lineage.originItemId,
+          rootItemId:lineage.rootItemId || lineage.originItemId,
+          parentName:String(lineage.originName || "").trim().slice(0, 160),
+          parentGeneration:Number.isInteger(lineage.originGeneration) && lineage.originGeneration >= 0 ? lineage.originGeneration : null,
+        }
+      : null;
+  }
+  function publishedCommunityOrigin(item) {
+    if (!item || !/^[0-9a-f-]{36}$/i.test(String(item.id || ""))) throw Error("PenEcho Cloud returned an invalid Craft confirmation.");
+    return {
+      originItemId:item.id,
+      rootItemId:/^[0-9a-f-]{36}$/i.test(String(item.rootItemId || "")) ? item.rootItemId : item.id,
+      originName:String(item.name || "").trim().slice(0, 160),
+      originGeneration:Number.isInteger(item.generation) && item.generation >= 0 ? item.generation : 0,
+    };
+  }
+  async function persistCurrentCanvasCommunityOrigin(origin) {
+    state.currentSnapshotBundleExtensions = {
+      ...snapshotExtensionObject(state.currentSnapshotBundleExtensions),
+      penechoCommunity:origin,
+    };
+    if (state.currentSnapshotLocation !== "device" || !state.currentSnapshotId) return;
+    const db = await snapshotDb(), transaction = db.transaction(SNAPSHOT_STORE, "readwrite"), store = transaction.objectStore(SNAPSHOT_STORE), item = await requestResult(store.get(state.currentSnapshotId));
+    if (!item) return;
+    item.bundleExtensions = { ...snapshotExtensionObject(item.bundleExtensions), penechoCommunity:origin };
+    store.put(item);
+    await transactionDone(transaction);
+  }
+  async function markPublishedCommunityOrigin(kind, artifact, item) {
+    const origin = publishedCommunityOrigin(item);
+    if (kind === "widget") {
+      const widgetId = artifact?.widget?.id, widget = state.widgets.find((candidate) => candidate.id === widgetId);
+      if (!widget) throw Error("The published Widget is no longer on this Canvas.");
+      widget.communityOriginItemId = origin.originItemId;
+      widget.communityRootItemId = origin.rootItemId;
+      widget.communityOriginName = origin.originName;
+      widget.communityOriginGeneration = origin.originGeneration;
+      save();
+      requestRender();
+    } else if (kind === "canvas") await persistCurrentCanvasCommunityOrigin(origin);
+    else throw Error("Unsupported Craft type.");
+    return origin;
   }
   async function saveServerSnapshot(item, tileEntries, overwriteId) {
     const response = await fetch(overwriteId ? `/api/canvases/${encodeURIComponent(overwriteId)}` : "/api/canvases", {
@@ -523,6 +985,38 @@
     });
     await snapshotApiResponse(response);
   }
+  async function saveCloudSnapshot(item, tileEntries, overwriteId) {
+    const bundle = await serverSnapshotPayload(item, tileEntries);
+    if (overwriteId) {
+      const existing = snapshotItems.find((entry) => entry.id === overwriteId),
+        baseRevisionId = existing?.currentRevisionId || state.currentSnapshotRevisionId || null,
+        response = await fetch(`/api/cloud/canvases/${encodeURIComponent(overwriteId)}/save`, {
+          method:"POST",
+          credentials:"same-origin",
+          headers:authenticatedApiHeaders({ "Content-Type":"application/json" }),
+          body:JSON.stringify({ baseRevisionId, bundle }),
+        }),
+        body = await snapshotApiResponse(response).catch(async (error) => {
+          if (error.status === 409) {
+            await refreshSnapshots();
+            throw Error(t("cloudCanvasConflict"));
+          }
+          throw error;
+        });
+      return { id:overwriteId, revisionId:body?.revision?.id || null };
+    }
+    const projectId = item.projectId || selectedCloudSaveProjectId();
+    if (!projectId) throw Error("Create a Cloud project before saving this Canvas");
+    const response = await fetch(`/api/cloud/projects/${encodeURIComponent(projectId)}/save`, {
+        method:"POST",
+        credentials:"same-origin",
+        headers:authenticatedApiHeaders({ "Content-Type":"application/json" }),
+        body:JSON.stringify({ name:item.name || "Untitled Canvas", bundle }),
+      }),
+      body = await snapshotApiResponse(response);
+    if (!body?.canvas?.id || !body?.revision?.id) throw Error("PenEcho Cloud returned an invalid save confirmation");
+    return { id:body.canvas.id, revisionId:body.revision.id };
+  }
   async function saveSnapshot({ overwriteId = null, name = null, location = state.snapshotLocation } = {}) {
     if (selectionAIBusy()) {
       setStatusKey(selectionAIStatusKey());
@@ -531,11 +1025,12 @@
     if (!SNAPSHOT_LOCATIONS.has(location)) throw Error("Invalid snapshot location");
     if (overwriteId && state.currentSnapshotLocation !== location) throw Error(t("noCurrentSnapshot"));
     await finalizeCanvasForSnapshot();
-    if (!tiles.size && !state.images.length && !state.textBoxes.length && (!pluginEnabled("animation") || !state.animations.length) && !visibleWidgets().length) {
+    if (!tiles.size && !state.images.length && !state.textBoxes.length && !state.preservedSnapshotAnimations.length && (!pluginEnabled("animation") || !state.animations.length) && !visibleWidgets().length) {
       setStatusKey("emptyCanvas");
       return null;
     }
     await prepareVisibleWidgetSnapshots(null, false);
+    const savedUserRevision = state.userRevision;
     const nameInput = document.querySelector("#historyName"),
       existing = overwriteId ? snapshotItems.find((item) => item.id === overwriteId) : null,
       id = overwriteId || `${Date.now()}-${crypto.randomUUID?.() || Math.random().toString(36).slice(2)}`,
@@ -547,18 +1042,22 @@
       textBoxes = storedTextBoxes(),
       images = storedImages(),
       tileEntries = await Promise.all([...tiles].map(async ([k, canvas]) => ({ k, blob: await canvasBlob(canvas) }))),
-      preview = await snapshotPreviewBlob(),
+      preview = location === "cloud" ? await cloudSnapshotPreviewBlob() : await snapshotPreviewBlob(),
       requestedName = String(name === null ? nameInput.value : name).trim().slice(0, 48),
       item = {
         version:2,
         id,
         createdAt,
         updatedAt,
-        name: requestedName || (overwriteId ? (existing ? existing.name : state.currentSnapshotName) : ""),
+        name: requestedName || (overwriteId ? (existing ? existing.name : state.currentSnapshotName) : location === "cloud" ? "Untitled Canvas" : ""),
         projectId:location === "server"
           ? overwriteId
             ? existing?.projectId || state.currentSnapshotProjectId || SERVER_DEFAULT_PROJECT_ID
             : selectedServerSaveProjectId()
+          : location === "cloud"
+            ? overwriteId
+              ? existing?.projectId || state.currentSnapshotProjectId || selectedCloudSaveProjectId()
+              : selectedCloudSaveProjectId()
           : null,
         theme: state.theme,
         view: { scale: state.scale, panX: state.panX, panY: state.panY, navigationLocked:state.navigationLocked },
@@ -572,19 +1071,32 @@
         imageCount: images.length,
         images,
         preview,
+        bundleExtensions:snapshotExtensionObject(state.currentSnapshotBundleExtensions),
+        manifestExtensions:snapshotExtensionObject(state.currentSnapshotManifestExtensions),
+        preservedAssets:snapshotPreservedAssets(state.currentSnapshotPreservedAssets),
       };
     if (overwriteId && !existing && overwriteId !== state.currentSnapshotId) throw Error(t("noCurrentSnapshot"));
+    let storedId = id,
+      storedRevisionId = null;
     if (location === "server") await saveServerSnapshot(item, tileEntries, overwriteId);
-    else await saveDeviceSnapshot(item, tileEntries, overwriteId);
+    else if (location === "cloud") {
+      const saved = await saveCloudSnapshot(item, tileEntries, overwriteId);
+      storedId = saved.id;
+      storedRevisionId = saved.revisionId;
+    } else await saveDeviceSnapshot(item, tileEntries, overwriteId);
     nameInput.value = "";
-    state.currentSnapshotId = id;
+    state.currentSnapshotId = storedId;
     state.currentSnapshotName = snapshotName(item);
     state.currentSnapshotLocation = location;
     state.currentSnapshotProjectId = item.projectId;
-    state.snapshotSavedRevision = state.userRevision;
+    state.currentSnapshotRevisionId = storedRevisionId;
+    state.currentSnapshotBundleExtensions = snapshotExtensionObject(item.bundleExtensions);
+    state.currentSnapshotManifestExtensions = snapshotExtensionObject(item.manifestExtensions);
+    state.currentSnapshotPreservedAssets = snapshotPreservedAssets(item.preservedAssets);
+    state.snapshotSavedRevision = savedUserRevision;
     await refreshSnapshots();
     setStatusKey(overwriteId ? "snapshotOverwritten" : "snapshotSaved");
-    return id;
+    return storedId;
   }
   async function readDeviceSnapshot(id) {
     const db = await snapshotDb(),
@@ -594,52 +1106,58 @@
       [item, tileEntries] = await Promise.all([requestResult(itemRequest), requestResult(tilesRequest)]);
     return item ? { item, tileEntries } : null;
   }
-  async function readServerSnapshot(id) {
+  async function readSnapshotBundle(stored) {
+    if (!stored || stored.bundleVersion !== 2 || stored.mode !== "snapshot" || stored.formatVersion !== 1 || stored.manifest?.format !== "penecho-raster-tiles" || stored.manifest?.formatVersion !== 1 || !Array.isArray(stored.assets)) throw Error("PenEcho returned an invalid canvas bundle");
+    const previewAsset = stored.assets.find((asset) => asset.kind === "preview"),
+      tileAssets = stored.assets.filter((asset) => asset.kind === "tile"),
+      imageAssets = stored.assets.filter((asset) => asset.kind === "resource" && asset.metadata?.resourceType === "image"),
+      widgetAssets = stored.assets.filter((asset) => asset.kind === "widget"),
+      widgets = await Promise.all(widgetAssets.map(async (asset) => {
+        const widget = JSON.parse(await snapshotBundleAssetBlob(asset).text());
+        if (!widget?.id || widget.id !== asset.metadata?.widgetId) throw Error("Canvas bundle contains an invalid widget");
+        return widget;
+      })),
+      imageById = new Map(imageAssets.map((asset) => [asset.metadata.resourceId, {
+        ...asset.metadata,
+        id:asset.metadata.resourceId,
+        blob:snapshotBundleAssetBlob(asset),
+      }])),
+      knownAssets = new Set([previewAsset, ...tileAssets, ...imageAssets, ...widgetAssets]),
+      preservedAssets = stored.assets.filter((asset) => !knownAssets.has(asset));
+    if (!previewAsset) throw Error("Canvas bundle has no preview");
+    return {
+      item:{
+        version:2,
+        id:stored.id,
+        createdAt:stored.createdAt,
+        updatedAt:stored.updatedAt || stored.createdAt,
+        name:stored.name || "",
+        theme:stored.manifest.theme,
+        view:stored.manifest.view,
+        animations:stored.manifest.animations || [],
+        textBoxes:stored.manifest.textBoxes || [],
+        projectId:stored.projectId || SERVER_DEFAULT_PROJECT_ID,
+        bundleExtensions:snapshotExtensionObject(stored.extensions),
+        manifestExtensions:snapshotExtensionObject(stored.manifest.extensions),
+        preservedAssets:snapshotPreservedAssets(preservedAssets),
+        preview:snapshotBundleAssetBlob(previewAsset),
+        widgets,
+        images:[...imageById.values()],
+      },
+      tileEntries:tileAssets.map((asset) => ({ k:asset.metadata?.tileKey, blob:snapshotBundleAssetBlob(asset) })),
+    };
+  }
+  async function readServerSnapshot(id, onProgress = null) {
     const response = await fetch(`/api/canvases/${encodeURIComponent(id)}`, {
         credentials:"same-origin",
         cache:"no-store",
         headers:authenticatedApiHeaders(),
       }),
-      body = await snapshotApiResponse(response),
+      body = await snapshotApiResponse(response, onProgress),
       stored = body?.canvas;
     if (!stored) throw Error("PenEcho server returned an invalid canvas");
     const storedVersion = stored.version ?? stored.bundleVersion ?? 1;
-    if (storedVersion === 2) {
-      if (stored.bundleVersion !== 2 || stored.mode !== "snapshot" || stored.formatVersion !== 1 || stored.manifest?.format !== "penecho-raster-tiles" || stored.manifest?.formatVersion !== 1 || !Array.isArray(stored.assets)) throw Error("PenEcho server returned an invalid canvas bundle");
-      const previewAsset = stored.assets.find((asset) => asset.kind === "preview"),
-        tileAssets = stored.assets.filter((asset) => asset.kind === "tile"),
-        imageAssets = stored.assets.filter((asset) => asset.kind === "resource" && asset.metadata?.resourceType === "image"),
-        widgetAssets = stored.assets.filter((asset) => asset.kind === "widget"),
-        widgets = await Promise.all(widgetAssets.map(async (asset) => {
-          const widget = JSON.parse(await snapshotBundleAssetBlob(asset).text());
-          if (!widget?.id || widget.id !== asset.metadata?.widgetId) throw Error("Canvas bundle contains an invalid widget");
-          return widget;
-        })),
-        imageById = new Map(imageAssets.map((asset) => [asset.metadata.resourceId, {
-          ...asset.metadata,
-          id:asset.metadata.resourceId,
-          blob:snapshotBundleAssetBlob(asset),
-        }]));
-      if (!previewAsset) throw Error("Canvas bundle has no preview");
-      return {
-        item:{
-          version:2,
-          id:stored.id,
-          createdAt:stored.createdAt,
-          updatedAt:stored.updatedAt || stored.createdAt,
-          name:stored.name || "",
-          theme:stored.manifest.theme,
-          view:stored.manifest.view,
-          animations:stored.manifest.animations || [],
-          textBoxes:stored.manifest.textBoxes || [],
-          projectId:stored.projectId || SERVER_DEFAULT_PROJECT_ID,
-          preview:snapshotBundleAssetBlob(previewAsset),
-          widgets,
-          images:[...imageById.values()],
-        },
-        tileEntries:tileAssets.map((asset) => ({ k:asset.metadata?.tileKey, blob:snapshotBundleAssetBlob(asset) })),
-      };
-    }
+    if (storedVersion === 2) return readSnapshotBundle(stored);
     if (!Array.isArray(stored.tiles) || !Array.isArray(stored.images)) throw Error("PenEcho server returned an invalid canvas");
     return {
       item:{
@@ -653,69 +1171,136 @@
       tileEntries:stored.tiles.map(({ k, data }) => ({ k, blob:dataUrlBlob(data) })),
     };
   }
-  async function readSnapshot(location, id) {
-    return location === "server" ? readServerSnapshot(id) : readDeviceSnapshot(id);
+  async function readCloudSnapshot(id, onProgress = null) {
+    const response = await fetch(`/api/cloud/canvases/${encodeURIComponent(id)}`, {
+        credentials:"same-origin",
+        cache:"no-store",
+        headers:authenticatedApiHeaders(),
+      }),
+      body = await snapshotApiResponse(response, onProgress);
+    if (!body?.bundle || !body?.revision?.id) throw Error("PenEcho Cloud returned an invalid Canvas");
+    const parsed = await readSnapshotBundle(body.bundle),
+      metadata = snapshotItems.find((item) => item.id === id);
+    parsed.item = {
+      ...parsed.item,
+      id,
+      name:metadata?.name || parsed.item.name,
+      projectId:metadata?.projectId || parsed.item.projectId,
+      currentRevisionId:body.revision.id,
+      updatedAt:metadata?.updatedAt || parsed.item.updatedAt,
+    };
+    return parsed;
+  }
+  async function readSnapshot(location, id, onProgress = null) {
+    if (location === "device") {
+      onProgress?.(0, 0, 0);
+      const stored = await readDeviceSnapshot(id);
+      onProgress?.(1, 0, 0);
+      return stored;
+    }
+    return location === "server" ? readServerSnapshot(id, onProgress) : readCloudSnapshot(id, onProgress);
   }
   async function loadSnapshot(id, location = state.snapshotLocation) {
-    const loadGeneration=++state.snapshotLoadGeneration;
-    if (state.selection) cancelSelection(true);
-    clearTextEditors();
-    state.userRevision++;
-    invalidateRecognition();
-    cancelPendingForRevision();
-    const expectedRevision=state.userRevision,
-      stored = await readSnapshot(location, id);
-    if (!stored) return;
-    const { item, tileEntries } = stored;
-    const loadIsCurrent = () => loadGeneration===state.snapshotLoadGeneration && state.userRevision===expectedRevision;
-    if (!loadIsCurrent()) return;
-    await enableSnapshotWidgetPlugins(item.widgets);
-    if (!loadIsCurrent()) return;
-    const [decodedTiles, images] = await Promise.all([
-      decodeSnapshotTilesInBatches(tileEntries, loadIsCurrent),
-      decodeStoredImages(item.images),
-    ]);
-    if (!decodedTiles || !loadIsCurrent()) {
-      if (decodedTiles) releaseSnapshotTileCanvases(decodedTiles);
-      return;
+    if (snapshotLoadInProgress) return false;
+    const loadGeneration=++state.snapshotLoadGeneration,
+      expectedRevision=state.userRevision,
+      metadata=snapshotItems.find((item) => item.id === id),
+      displayName=metadata ? snapshotName(metadata) : id;
+    snapshotLoadInProgress = true;
+    snapshotLoadingId = id;
+    updateHistoryReadControls();
+    setHistoryActivity(t("snapshotLoading").replace("{name}", displayName), t("snapshotLoadRequesting"), 4);
+    const loadIsCurrent = () => loadGeneration===state.snapshotLoadGeneration && state.userRevision===expectedRevision,
+      requireCurrent = () => { if (!loadIsCurrent()) throw Error(t("snapshotLoadChanged")); };
+    let decodedTiles = null;
+    try {
+      const stored = await readSnapshot(location, id, (fraction, received) => {
+        if (!loadIsCurrent()) return;
+        const progress = Number.isFinite(fraction) ? 5 + fraction * 30 : 12;
+        const bytes = received > 0 ? ` ${snapshotByteLabel(received)}` : "";
+        setHistoryActivity(t("snapshotLoading").replace("{name}", displayName), `${t("snapshotLoadDownloading")}${bytes}`, progress);
+      });
+      if (!stored) throw Error("Canvas snapshot was not found.");
+      requireCurrent();
+      const { item, tileEntries } = stored;
+      setHistoryActivity(t("snapshotLoading").replace("{name}", displayName), t("snapshotLoadPreparing"), 38);
+      await enableSnapshotWidgetPlugins(item.widgets);
+      requireCurrent();
+      let tileProgress = tileEntries.length ? 0 : 1, imageProgress = item.images?.length ? 0 : 1;
+      const updateDecodeProgress = () => setHistoryActivity(t("snapshotLoading").replace("{name}", displayName), t("snapshotLoadDecoding"), 42 + (tileProgress * .7 + imageProgress * .3) * 48);
+      const tileTask = decodeSnapshotTilesInBatches(tileEntries, loadIsCurrent, (progress) => { tileProgress = progress; updateDecodeProgress(); })
+        .then((tilesResult) => (decodedTiles = tilesResult)),
+        imageTask = decodeSnapshotImagesInBatches(item.images, loadIsCurrent, (progress) => { imageProgress = progress; updateDecodeProgress(); });
+      const [tileResult, imageResult] = await Promise.allSettled([tileTask, imageTask]);
+      if (tileResult.status === "rejected") throw tileResult.reason;
+      if (imageResult.status === "rejected") throw imageResult.reason;
+      const images = imageResult.value;
+      if (!decodedTiles || !loadIsCurrent()) {
+        if (decodedTiles) releaseSnapshotTileCanvases(decodedTiles);
+        requireCurrent();
+      }
+      if (!images || !loadIsCurrent()) {
+        releaseSnapshotTileCanvases(decodedTiles);
+        requireCurrent();
+      }
+      setHistoryActivity(t("snapshotLoading").replace("{name}", displayName), t("snapshotLoadApplying"), 94);
+      if (state.selection) cancelSelection(true);
+      clearTextEditors();
+      state.userRevision++;
+      invalidateRecognition();
+      cancelPendingForRevision();
+      for (const canvas of tiles.values()) canvas.width = canvas.height = 1;
+      tiles.clear();
+      clearSharpOverlays();
+      state.inkBounds.clear();
+      state.history = [];
+      state.future = [];
+      state.animationHistoryBefore = null;
+      state.widgetHistoryBefore = null;
+      state.historyBefore.clear();
+      state.imageHistoryBefore = null;
+      state.textBoxHistoryBefore = null;
+      for (const [k, canvas] of decodedTiles) tiles.set(k, canvas);
+      decodedTiles.clear();
+      restoreAnimations(item.animations);
+      restoreWidgets(item.widgets);
+      applyTheme(item.theme);
+      restoreImages(images);
+      await restoreTextBoxes(item.textBoxes);
+      if (item.view) {
+        state.scale = Math.max(0.03, Math.min(2, item.view.scale));
+        state.panX = item.view.panX;
+        state.panY = item.view.panY;
+        updateCoordinates();
+      }
+      setCanvasNavigationLocked(item.view?.navigationLocked === true);
+      state.currentSnapshotId = item.id;
+      state.currentSnapshotName = snapshotName(item);
+      state.currentSnapshotLocation = location;
+      state.currentSnapshotProjectId = item.projectId || null;
+      state.currentSnapshotRevisionId = location === "cloud" ? item.currentRevisionId || null : null;
+      state.currentSnapshotBundleExtensions = snapshotExtensionObject(item.bundleExtensions);
+      state.currentSnapshotManifestExtensions = snapshotExtensionObject(item.manifestExtensions);
+      state.currentSnapshotPreservedAssets = snapshotPreservedAssets(item.preservedAssets);
+      state.snapshotSavedRevision = state.userRevision;
+      setHistoryActivity(t("snapshotLoading").replace("{name}", displayName), t("snapshotLoadApplying"), 100);
+      render();
+      closeHistoryPanel();
+      setStatusKey("snapshotLoaded");
+      return true;
+    } catch (error) {
+      if (decodedTiles?.size) releaseSnapshotTileCanvases(decodedTiles);
+      if (loadGeneration !== state.snapshotLoadGeneration) return false;
+      const message = t("snapshotLoadFailed").replace("{message}", String(error?.message || error));
+      setHistoryActivity(t("snapshotLoading").replace("{name}", displayName), message, null, "error");
+      throw error;
+    } finally {
+      if (loadGeneration === state.snapshotLoadGeneration) {
+        snapshotLoadInProgress = false;
+        snapshotLoadingId = null;
+        updateHistoryReadControls();
+      }
     }
-    state.userRevision++;
-    invalidateRecognition();
-    cancelPendingForRevision();
-    clearTextEditors();
-    for (const canvas of tiles.values()) canvas.width = canvas.height = 1;
-    tiles.clear();
-    clearSharpOverlays();
-    state.inkBounds.clear();
-    state.history = [];
-    state.future = [];
-    state.animationHistoryBefore = null;
-    state.widgetHistoryBefore = null;
-    state.historyBefore.clear();
-    state.imageHistoryBefore = null;
-    state.textBoxHistoryBefore = null;
-    for (const [k, canvas] of decodedTiles) tiles.set(k, canvas);
-    decodedTiles.clear();
-    restoreAnimations(item.animations);
-    restoreWidgets(item.widgets);
-    applyTheme(item.theme);
-    restoreImages(images);
-    await restoreTextBoxes(item.textBoxes);
-    if (item.view) {
-      state.scale = Math.max(0.03, Math.min(2, item.view.scale));
-      state.panX = item.view.panX;
-      state.panY = item.view.panY;
-      updateCoordinates();
-    }
-    setCanvasNavigationLocked(item.view?.navigationLocked === true);
-    state.currentSnapshotId = item.id;
-    state.currentSnapshotName = snapshotName(item);
-    state.currentSnapshotLocation = location;
-    state.currentSnapshotProjectId = item.projectId || null;
-    state.snapshotSavedRevision = state.userRevision;
-    render();
-    closeHistoryPanel();
-    setStatusKey("snapshotLoaded");
   }
   async function deleteDeviceSnapshot(id) {
     const db = await snapshotDb(),
@@ -735,15 +1320,28 @@
     });
     await snapshotApiResponse(response);
   }
+  async function deleteCloudSnapshot(id) {
+    const response = await fetch(`/api/cloud/canvases/${encodeURIComponent(id)}`, {
+      method:"DELETE",
+      credentials:"same-origin",
+      headers:authenticatedApiHeaders(),
+    });
+    if (!response.ok) await snapshotApiResponse(response);
+  }
   async function deleteSnapshot(id, location = state.snapshotLocation) {
-    if (!confirm(t(location === "server" ? "deleteSnapshotConfirmServer" : "deleteSnapshotConfirmDevice"))) return;
+    if (!confirm(t(location === "server" ? "deleteSnapshotConfirmServer" : location === "cloud" ? "deleteSnapshotConfirmCloud" : "deleteSnapshotConfirmDevice"))) return;
     if (location === "server") await deleteServerSnapshot(id);
+    else if (location === "cloud") await deleteCloudSnapshot(id);
     else await deleteDeviceSnapshot(id);
     if (state.currentSnapshotId === id && state.currentSnapshotLocation === location) {
       state.currentSnapshotId = null;
       state.currentSnapshotName = "";
       state.currentSnapshotLocation = null;
       state.currentSnapshotProjectId = null;
+      state.currentSnapshotRevisionId = null;
+      state.currentSnapshotBundleExtensions = {};
+      state.currentSnapshotManifestExtensions = {};
+      state.currentSnapshotPreservedAssets = [];
     }
     await refreshSnapshots();
     setStatusKey("snapshotDeleted");
@@ -755,22 +1353,28 @@
       description = document.querySelector("#newCanvasDialog > form > p:not(.current-snapshot)"),
       discard = document.querySelector("#newDiscard"),
       saveCopy = document.querySelector("#newSaveCopy"),
-      loading = Boolean(pendingCanvasTransition);
+      loading = Boolean(pendingCanvasTransition),
+      cloudBlocked = state.snapshotLocation === "cloud" && cloudHistorySignInRequired;
     if (!label || !overwrite) return;
     if (title) title.textContent = t(loading ? "loadCanvasTitle" : "newCanvasTitle");
     if (description) description.textContent = t(loading ? "loadCanvasDescription" : "newCanvasDescription");
     if (discard) discard.textContent = t(loading ? "loadWithoutSave" : "newWithoutSave");
     if (saveCopy) saveCopy.textContent = t(loading ? "saveAsNewAndLoad" : "saveAsNewAndCreate");
     overwrite.textContent = t(loading ? "overwriteAndLoad" : "overwriteAndCreate");
-    if (!state.currentSnapshotId) label.textContent = t("noCurrentSnapshot");
-    else {
+    const hasCurrentSnapshot = Boolean(state.currentSnapshotId);
+    label.hidden = !hasCurrentSnapshot;
+    overwrite.hidden = !hasCurrentSnapshot;
+    if (hasCurrentSnapshot) {
       const sameLocation = state.currentSnapshotLocation === state.snapshotLocation,
         key = sameLocation ? "currentSnapshot" : "currentSnapshotOtherLocation";
       label.textContent = t(key)
         .replace("{name}", state.currentSnapshotName || state.currentSnapshotId)
         .replace("{location}", snapshotLocationLabel(state.currentSnapshotLocation));
     }
-    overwrite.disabled = !state.currentSnapshotId || state.currentSnapshotLocation !== state.snapshotLocation;
+    overwrite.disabled = cloudBlocked || !hasCurrentSnapshot || state.currentSnapshotLocation !== state.snapshotLocation;
+    if (saveCopy) saveCopy.disabled = cloudBlocked;
+    const project = document.querySelector("#newCanvasProjectSelect");
+    if (project) project.disabled = cloudBlocked;
     updateSnapshotLocationUi();
   }
   function setNewCanvasDialogBusy(busy) {
@@ -805,6 +1409,10 @@
     state.currentSnapshotName = "";
     state.currentSnapshotLocation = null;
     state.currentSnapshotProjectId = null;
+    state.currentSnapshotRevisionId = null;
+    state.currentSnapshotBundleExtensions = {};
+    state.currentSnapshotManifestExtensions = {};
+    state.currentSnapshotPreservedAssets = [];
     state.viewInitialized = false;
     state.aiDraftReturnMode = null;
     state.pendingHistoryRestored = false;
@@ -858,8 +1466,11 @@
     }
   }
   function canvasHasUnsavedChanges() {
-    const hasContent = tiles.size || state.images.length || state.textBoxes.length || (pluginEnabled("animation") && state.animations.length) || visibleWidgets().length;
+    const hasContent = tiles.size || state.images.length || state.textBoxes.length || state.preservedSnapshotAnimations.length || (pluginEnabled("animation") && state.animations.length) || visibleWidgets().length;
     return Boolean(hasContent && (state.dirty || state.userRevision !== state.snapshotSavedRevision));
+  }
+  function confirmExternalCanvasOpen() {
+    return !canvasHasUnsavedChanges() || window.confirm(cloudHistoryCopy("confirmExternalOpen"));
   }
   function requestLoadSnapshot(id, location = state.snapshotLocation) {
     if (!canvasHasUnsavedChanges()) return loadSnapshot(id, location);
@@ -870,6 +1481,24 @@
     updateNewCanvasDialog();
     if (!dialog.open) dialog.showModal();
     return Promise.resolve(false);
+  }
+  async function openCloudProjectHistory(projectId = null) {
+    if (projectId && validCloudProjectSelection(projectId)) rememberSelectedCloudProject(projectId);
+    setSnapshotLocation("cloud", { refresh:false });
+    await refreshSnapshots();
+    // The explicit refresh above verifies the selected project before the
+    // panel becomes visible. Do not immediately issue the same Cloud library
+    // request again from openHistoryPanel(); duplicated requests can race and
+    // used to surface a misleading 502 after an otherwise successful load.
+    openHistoryPanel(false);
+    return true;
+  }
+  async function openCloudCanvas(canvasId) {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(canvasId || ""))) throw Error("Invalid Cloud Canvas");
+    setSnapshotLocation("cloud", { refresh:false });
+    // Cloud Center already resolved this explicit Canvas id. Load that bundle
+    // through the local Cloud proxy without refreshing the unrelated library.
+    return requestLoadSnapshot(canvasId, "cloud");
   }
   function discardCanvasTransition() {
     const transition = pendingCanvasTransition;
@@ -882,8 +1511,43 @@
   function snapshotName(item) {
     return item.name || new Intl.DateTimeFormat(state.language === "zh" ? "zh-CN" : "en", { dateStyle: "medium", timeStyle: "short" }).format(item.createdAt);
   }
+  function renderSnapshotListLoading(location = state.snapshotLocation) {
+    const list = document.querySelector("#historyList");
+    if (!list) return;
+    const loading = document.createElement("div");
+    loading.className = "history-list-loading";
+    loading.setAttribute("role", "status");
+    loading.textContent = t("snapshotLibraryLoading").replace("{location}", snapshotLocationLabel(location));
+    list.replaceChildren(loading);
+  }
+  function renderSnapshotListError(location = state.snapshotLocation) {
+    const list = document.querySelector("#historyList");
+    if (!list) return;
+    const error = document.createElement("div");
+    error.className = "history-list-loading error";
+    error.setAttribute("role", "alert");
+    error.textContent = t("snapshotLibraryLoadFailed").replace("{location}", snapshotLocationLabel(location));
+    list.replaceChildren(error);
+  }
+  function renderCloudHistorySignIn() {
+    const list = document.querySelector("#historyList");
+    if (!list) return;
+    const empty = document.createElement("div"), title = document.createElement("strong"),
+      description = document.createElement("p"), action = document.createElement("button");
+    empty.className = "history-cloud-auth";
+    title.textContent = cloudHistoryCopy("title");
+    description.textContent = cloudHistoryCopy("description");
+    action.type = "button";
+    action.textContent = cloudHistoryCopy("action");
+    action.onclick = () => {
+      closeHistoryPanel();
+      document.querySelector("#cloudAccountBtn")?.click();
+    };
+    empty.append(title, description, action);
+    list.replaceChildren(empty);
+  }
   function serverProjectName(project) {
-    return project?.id === SERVER_DEFAULT_PROJECT_ID || project?.system ? t("canvasProjectUncategorized") : project?.name || t("canvasProjectUncategorized");
+    return project?.id === SERVER_DEFAULT_PROJECT_ID || project?.system || project?.systemKey === "uncategorized" ? t("canvasProjectUncategorized") : project?.name || t("canvasProjectUncategorized");
   }
   function renderServerProjectUi() {
     const manager = document.querySelector("#serverProjectManager"),
@@ -892,16 +1556,20 @@
       dialogField = document.querySelector("#newCanvasProjectField"),
       dialogSelect = document.querySelector("#newCanvasProjectSelect");
     if (!manager || !select || !remove) return;
-    const visible = state.snapshotLocation === "server";
+    const location = state.snapshotLocation,
+      visible = location === "server" || location === "cloud";
     manager.hidden = !visible;
     if (dialogField) dialogField.hidden = !visible;
     if (!visible) return;
-    const projects = serverCanvasProjects.length
-      ? serverCanvasProjects
-      : [{ id:SERVER_DEFAULT_PROJECT_ID, name:"Uncategorized", system:true }];
+    const isCloud = location === "cloud",
+      projects = isCloud ? cloudCanvasProjects : serverCanvasProjects.length
+        ? serverCanvasProjects
+        : [{ id:SERVER_DEFAULT_PROJECT_ID, name:"Uncategorized", system:true }],
+      allProjectId = isCloud ? CLOUD_ALL_PROJECTS_ID : SERVER_ALL_PROJECTS_ID,
+      selectedProjectId = isCloud ? selectedCloudProjectId : selectedServerProjectId;
     select.replaceChildren();
     const all = document.createElement("option");
-    all.value = SERVER_ALL_PROJECTS_ID;
+    all.value = allProjectId;
     all.textContent = t("canvasProjectAll");
     select.append(all);
     for (const project of projects) {
@@ -910,11 +1578,14 @@
       option.textContent = serverProjectName(project);
       select.append(option);
     }
-    if (serverCanvasProjects.length && ![...select.options].some((option) => option.value === selectedServerProjectId)) rememberSelectedServerProject(SERVER_DEFAULT_PROJECT_ID);
-    select.value = selectedServerProjectId;
-    if (!select.value) select.value = SERVER_ALL_PROJECTS_ID;
-    const selected = serverCanvasProjects.find((project) => project.id === selectedServerProjectId);
-    remove.disabled = !selected || selected.id === SERVER_DEFAULT_PROJECT_ID || selected.system === true;
+    if (projects.length && ![...select.options].some((option) => option.value === selectedProjectId)) {
+      if (isCloud) rememberSelectedCloudProject(cloudDefaultProjectId() || CLOUD_ALL_PROJECTS_ID);
+      else rememberSelectedServerProject(SERVER_DEFAULT_PROJECT_ID);
+    }
+    select.value = isCloud ? selectedCloudProjectId : selectedServerProjectId;
+    if (!select.value) select.value = allProjectId;
+    const selected = projects.find((project) => project.id === select.value);
+    remove.disabled = isCloud && cloudHistorySignInRequired || !selected || selected.id === SERVER_DEFAULT_PROJECT_ID || selected.system === true || selected.systemKey === "uncategorized";
     if (dialogSelect) {
       dialogSelect.replaceChildren();
       for (const project of projects) {
@@ -923,8 +1594,8 @@
         option.textContent = serverProjectName(project);
         dialogSelect.append(option);
       }
-      dialogSelect.value = selectedServerSaveProjectId();
-      if (!dialogSelect.value) dialogSelect.value = SERVER_DEFAULT_PROJECT_ID;
+      dialogSelect.value = isCloud ? selectedCloudSaveProjectId() : selectedServerSaveProjectId();
+      if (!dialogSelect.value) dialogSelect.value = isCloud ? cloudDefaultProjectId() || "" : SERVER_DEFAULT_PROJECT_ID;
     }
   }
   function openServerProjectDialog() {
@@ -946,41 +1617,49 @@
       return false;
     }
     input.setCustomValidity("");
-    const response = await fetch("/api/canvas-projects", {
+    const isCloud = state.snapshotLocation === "cloud",
+      response = await fetch(isCloud ? "/api/cloud/projects" : "/api/canvas-projects", {
         method:"POST",
         credentials:"same-origin",
         headers:authenticatedApiHeaders({ "Content-Type":"application/json" }),
         body:JSON.stringify({ name }),
       }),
       body = await snapshotApiResponse(response);
-    rememberSelectedServerProject(body.project.id);
+    if (isCloud) rememberSelectedCloudProject(body.project.id);
+    else rememberSelectedServerProject(body.project.id);
     await refreshSnapshots();
     if (dialog.open) dialog.close("created");
     showHistoryNoticeKey("canvasProjectCreated", "success");
     return true;
   }
   async function deleteSelectedServerProject() {
-    const project = serverCanvasProjects.find((item) => item.id === selectedServerProjectId);
-    if (!project || project.id === SERVER_DEFAULT_PROJECT_ID || project.system) return;
-    const response = await fetch(`/api/canvas-projects/${encodeURIComponent(project.id)}`, {
+    const isCloud = state.snapshotLocation === "cloud",
+      projects = isCloud ? cloudCanvasProjects : serverCanvasProjects,
+      selectedProjectId = isCloud ? selectedCloudProjectId : selectedServerProjectId,
+      project = projects.find((item) => item.id === selectedProjectId);
+    if (!project || project.id === SERVER_DEFAULT_PROJECT_ID || project.system || project.systemKey === "uncategorized") return;
+    if (isCloud && !confirm(t("deleteCloudProjectConfirm").replace("{name}", project.name || t("canvasProjectUncategorized")))) return;
+    const response = await fetch(isCloud ? `/api/cloud/projects/${encodeURIComponent(project.id)}` : `/api/canvas-projects/${encodeURIComponent(project.id)}`, {
       method:"DELETE",
       credentials:"same-origin",
       headers:authenticatedApiHeaders(),
     });
     await snapshotApiResponse(response);
-    rememberSelectedServerProject(SERVER_DEFAULT_PROJECT_ID);
+    if (isCloud) rememberSelectedCloudProject(CLOUD_ALL_PROJECTS_ID);
+    else rememberSelectedServerProject(SERVER_DEFAULT_PROJECT_ID);
     await refreshSnapshots();
     showHistoryNoticeKey("canvasProjectDeleted", "success", 4200);
   }
   async function moveServerSnapshot(id, projectId) {
-    const response = await fetch(`/api/canvases/${encodeURIComponent(id)}/project`, {
-      method:"PUT",
+    const isCloud = state.snapshotLocation === "cloud",
+      response = await fetch(isCloud ? `/api/cloud/canvases/${encodeURIComponent(id)}` : `/api/canvases/${encodeURIComponent(id)}/project`, {
+      method:isCloud ? "PATCH" : "PUT",
       credentials:"same-origin",
       headers:authenticatedApiHeaders({ "Content-Type":"application/json" }),
       body:JSON.stringify({ projectId }),
     });
     await snapshotApiResponse(response);
-    if (state.currentSnapshotId === id && state.currentSnapshotLocation === "server") state.currentSnapshotProjectId = projectId;
+    if (state.currentSnapshotId === id && state.currentSnapshotLocation === state.snapshotLocation) state.currentSnapshotProjectId = projectId;
     await refreshSnapshots();
     showHistoryNoticeKey("canvasProjectMoved", "success");
   }
@@ -989,14 +1668,25 @@
       location = state.snapshotLocation,
       items = location === "server" && selectedServerProjectId !== SERVER_ALL_PROJECTS_ID
         ? snapshotItems.filter((item) => (item.projectId || SERVER_DEFAULT_PROJECT_ID) === selectedServerProjectId)
+        : location === "cloud" && selectedCloudProjectId !== CLOUD_ALL_PROJECTS_ID
+          ? snapshotItems.filter((item) => item.projectId === selectedCloudProjectId)
         : snapshotItems;
     if (!list) return;
     renderServerProjectUi();
+    if (location === "cloud" && cloudHistorySignInRequired) {
+      renderCloudHistorySignIn();
+      updateHistoryReadControls();
+      return;
+    }
+    if (snapshotListInProgress && snapshotItemsLocation !== location) {
+      renderSnapshotListLoading(location);
+      return;
+    }
     list.replaceChildren();
     if (!items.length) {
       const empty = document.createElement("div");
       empty.className = "history-empty";
-      empty.textContent = t(location === "server" && snapshotItems.length ? "emptyProjectHistory" : location === "server" ? "emptyServerHistory" : "emptyDeviceHistory");
+      empty.textContent = t((location === "server" || location === "cloud") && snapshotItems.length ? "emptyProjectHistory" : location === "server" ? "emptyServerHistory" : location === "cloud" ? "emptyCloudHistory" : "emptyDeviceHistory");
       list.append(empty);
       return;
     }
@@ -1012,6 +1702,7 @@
         remove = document.createElement("button"),
         url = item.preview instanceof Blob ? URL.createObjectURL(item.preview) : "";
       card.className = "history-card";
+      card.dataset.snapshotId = item.id;
       const isCurrent = item.id === state.currentSnapshotId && location === state.currentSnapshotLocation;
       card.classList.toggle("current", isCurrent);
       if (isCurrent) card.setAttribute("aria-current", "true");
@@ -1027,7 +1718,7 @@
       const modified = new Intl.DateTimeFormat(state.language === "zh" ? "zh-CN" : "en", { dateStyle: "short", timeStyle: "short" }).format(item.updatedAt || item.createdAt);
       detail.textContent = t("snapshotModified").replace("{time}", modified);
       const stats = document.createElement("div"),
-        counts = [[item.tileCount, "snapshotTiles"]];
+        counts = Number.isFinite(item.tileCount) ? [[item.tileCount, "snapshotTiles"]] : [];
       if (pluginEnabled("animation") && item.animationCount) counts.push([item.animationCount, "snapshotAnimations"]);
       if (item.widgetCount) counts.push([item.widgetCount, "snapshotWidgets"]);
       if (item.imageCount) counts.push([item.imageCount, "snapshotImages"]);
@@ -1040,6 +1731,7 @@
       }
       actions.className = "history-actions";
       load.className = "history-load";
+      load.dataset.snapshotId = item.id;
       load.textContent = t("loadSnapshot");
       load.onclick = () => runSnapshotLoadAction(load, () => requestLoadSnapshot(item.id, location));
       remove.className = "history-delete";
@@ -1047,18 +1739,19 @@
       remove.onclick = () => runSnapshotAction(() => deleteSnapshot(item.id, location));
       actions.append(load, remove);
       meta.append(title, detail, stats, actions);
-      if (location === "server") {
+      if (location === "server" || location === "cloud") {
         const move = document.createElement("select");
         move.className = "history-move";
         move.setAttribute("aria-label", t("canvasProjectMove"));
         move.title = t("canvasProjectMove");
-        for (const project of serverCanvasProjects) {
+        const projects = location === "cloud" ? cloudCanvasProjects : serverCanvasProjects;
+        for (const project of projects) {
           const option = document.createElement("option");
           option.value = project.id;
           option.textContent = `${t("canvasProject")}: ${serverProjectName(project)}`;
           move.append(option);
         }
-        move.value = item.projectId || SERVER_DEFAULT_PROJECT_ID;
+        move.value = item.projectId || (location === "cloud" ? cloudDefaultProjectId() || "" : SERVER_DEFAULT_PROJECT_ID);
         move.onchange = () => runSnapshotAction(() => moveServerSnapshot(item.id, move.value));
         meta.append(move);
       }
@@ -1069,10 +1762,61 @@
   async function refreshSnapshots() {
     const generation = ++snapshotListGeneration,
       location = state.snapshotLocation,
-      items = await snapshotsAt(location);
-    if (generation !== snapshotListGeneration || location !== state.snapshotLocation) return;
-    snapshotItems = items;
-    renderSnapshotList();
+      replacingLocation = snapshotItemsLocation !== location;
+    snapshotListInProgress = true;
+    if (replacingLocation) {
+      snapshotItems = [];
+      snapshotItemsLocation = null;
+      renderSnapshotListLoading(location);
+    }
+    setHistoryActivity(
+      t("snapshotLibraryLoading").replace("{location}", snapshotLocationLabel(location)),
+      t("snapshotLibraryLoadingDetail"),
+      null,
+    );
+    updateHistoryReadControls();
+    let authenticationRequired = false;
+    try {
+      const items = await snapshotsAt(location);
+      if (generation !== snapshotListGeneration || location !== state.snapshotLocation) return false;
+      if (location === "cloud") cloudHistorySignInRequired = false;
+      snapshotItems = items;
+      snapshotItemsLocation = location;
+      renderSnapshotList();
+      hideHistoryActivity(260);
+      return true;
+    } catch (error) {
+      if (generation === snapshotListGeneration && location === state.snapshotLocation) {
+        authenticationRequired = location === "cloud" && cloudHistoryRequiresSignIn(error);
+        if (location === "cloud") cloudHistorySignInRequired = authenticationRequired;
+        if (authenticationRequired) {
+          snapshotItems = [];
+          snapshotItemsLocation = null;
+          cloudCanvasProjects = [];
+          renderCloudHistorySignIn();
+        } else if (replacingLocation) {
+          snapshotItems = [];
+          snapshotItemsLocation = null;
+          renderSnapshotListError(location);
+        }
+        if (!authenticationRequired) {
+          setHistoryActivity(
+            t("snapshotLibraryLoading").replace("{location}", snapshotLocationLabel(location)),
+            t("snapshotLibraryLoadFailed").replace("{location}", snapshotLocationLabel(location)),
+            null,
+            "error",
+          );
+        }
+      }
+      if (authenticationRequired) return false;
+      throw error;
+    } finally {
+      if (generation === snapshotListGeneration) {
+        snapshotListInProgress = false;
+        if (authenticationRequired) hideHistoryActivity();
+        updateHistoryReadControls();
+      }
+    }
   }
   async function runSnapshotAction(action) {
     try {
@@ -1092,7 +1836,7 @@
       button.removeAttribute("aria-busy");
     }
   }
-  function openHistoryPanel() {
+  function openHistoryPanel(refresh = true) {
     const panel = document.querySelector("#historyPanel"),
       backdrop = document.querySelector("#historyBackdrop"),
       button = document.querySelector("#historyBtn");
@@ -1102,7 +1846,9 @@
     panel.setAttribute("aria-hidden", "false");
     button.setAttribute("aria-expanded", "true");
     updateSnapshotLocationUi();
-    refreshSnapshots().catch((error) => setStatus(`${t("snapshotError")}${error.message}`));
+    if (refresh) refreshSnapshots().catch((error) => {
+      if (state.snapshotLocation !== "cloud" || !cloudHistoryRequiresSignIn(error)) setStatus(`${t("snapshotError")}${error.message}`);
+    });
   }
   function closeHistoryPanel() {
     const panel = document.querySelector("#historyPanel"),

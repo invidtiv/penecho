@@ -7,6 +7,9 @@
   <link rel="icon" href="data:,">
   <title>PenEcho | Handwritten AI Canvas</title>
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="cloud-connect.css">
+  <link rel="stylesheet" href="remote-canvas.css">
+  <link rel="stylesheet" href="viewer.css">
   <script src="mathjax-config.js"></script>
   <script
     defer
@@ -24,7 +27,6 @@
           </div>
           <div class="brand-copy">
             <h1><span>Pen</span><strong>Echo</strong></h1>
-            <p data-i18n="tagline">Write across twenty thousand squares and summon knowledge</p>
           </div>
         </div>
         <div id="aiStatusArea" class="status-wrap">
@@ -53,6 +55,9 @@
           <button id="saveCanvasBtn" class="icon-button utility-icon" type="button" data-i18n-aria="saveCanvas" aria-label="Save canvas" data-i18n-title="saveCanvas" title="Save canvas">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h12l2 2v14H5Z"/><path d="M8 4v6h8V4M8 20v-6h8v6"/></svg>
           </button>
+          <button id="shareCanvasBtn" class="icon-button utility-icon cloud-share-canvas" type="button" data-i18n-aria="shareCanvasCloud" aria-label="Share Canvas to PenEcho Cloud" data-i18n-title="shareCanvasCloud" title="Share Canvas to PenEcho Cloud">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="m8.3 10.8 7.4-4.5M8.3 13.2l7.4 4.5"/></svg>
+          </button>
           <button id="exportPngBtn" class="icon-button utility-icon" type="button" data-i18n-aria="exportPng" aria-label="Export PNG" data-i18n-title="exportPng" title="Export PNG">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 15v5h14v-5"/></svg>
           </button>
@@ -60,6 +65,11 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4Z"/><path d="M8 5V3h8v2M8 10h8M8 14h6"/></svg>
           </button>
         </span>
+        <button id="cloudAccountBtn" class="cloud-account-button" type="button" aria-label="PenEcho Cloud" title="PenEcho Cloud" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18.5h10.5a4 4 0 0 0 .4-8A6.2 6.2 0 0 0 6 9.2 4.7 4.7 0 0 0 7 18.5Z"/></svg>
+          <span class="cloud-account-label">Cloud</span>
+          <span class="cloud-account-dot" aria-hidden="true"></span>
+        </button>
         <button id="settingsBtn" class="icon-button utility-icon" type="button" data-i18n-aria="settingsTitle" aria-label="Settings" data-i18n-title="settingsTitle" title="Settings" aria-expanded="false" aria-controls="settingsPanel">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2Z"/></svg>
         </button>
@@ -97,6 +107,11 @@
             <button id="pluginButton" class="plugin-trigger" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="pluginPopover" data-i18n-aria="plugins" aria-label="Plugins" data-i18n-title="plugins" title="Plugins">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4h3a2 2 0 1 1 4 0h3a2 2 0 0 1 2 2v3a2 2 0 1 0 0 4v3a2 2 0 0 1-2 2h-3a2 2 0 1 1-4 0H8a2 2 0 0 1-2-2v-3a2 2 0 1 0 0-4V6a2 2 0 0 1 2-2Z"/></svg>
               <span data-i18n="plugins">Plugins</span>
+            </button>
+          </div>
+          <div id="craftsControl" class="plugin-control">
+            <button id="craftsButton" class="plugin-trigger crafts-trigger" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="craftsPopover" data-i18n-aria="savedCrafts" aria-label="Favorites" data-i18n-title="savedCrafts" title="Favorites">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
             </button>
           </div>
           </div>
@@ -182,16 +197,16 @@
     <div id="historyBackdrop" class="history-backdrop" hidden></div>
     <aside id="historyPanel" class="history-panel" aria-hidden="true" aria-labelledby="historyTitle" inert>
       <header>
-        <div><span class="history-kicker">PenEcho</span><h2 id="historyTitle" data-i18n="historyTitle">Canvas history</h2></div>
+        <h2 id="historyTitle" data-i18n="historyTitle">Canvas history</h2>
         <button id="historyClose" type="button" data-i18n-aria="closeHistory" aria-label="Close history" data-i18n-title="closeHistory" title="Close history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
       </header>
-      <p data-i18n="historyDescription">Stores confirmed canvas content only. Unconfirmed AI drafts are excluded.</p>
       <div class="history-composer">
         <fieldset class="snapshot-location" aria-describedby="historyStorageDescription">
           <legend data-i18n="saveLocation">Save location</legend>
           <div class="snapshot-location-options">
             <label><input type="radio" name="historyStorageLocation" value="device"><span data-i18n="storageThisDevice">This device</span></label>
             <label><input type="radio" name="historyStorageLocation" value="server"><span data-i18n="storagePenEchoServer">PenEcho server</span></label>
+            <label><input type="radio" name="historyStorageLocation" value="cloud"><span data-i18n="storagePenEchoCloud">PenEcho Cloud</span></label>
           </div>
           <p id="historyStorageDescription" class="snapshot-location-description"></p>
         </fieldset>
@@ -207,18 +222,22 @@
           <div class="history-save-actions">
             <button id="historySaveCurrent" type="button" data-i18n="saveCurrentSnapshot">Save</button>
             <button id="historySave" type="button" data-i18n="saveSnapshot">Save New</button>
-            <button id="historyNew" type="button" data-i18n="newCanvas">New</button>
           </div>
           <div id="historyNotice" class="history-notice" role="status" aria-live="polite" aria-atomic="true"></div>
         </div>
       </div>
+      <section id="historyActivity" class="history-activity" role="status" aria-live="polite" aria-atomic="true" hidden>
+        <span class="history-activity-icon" aria-hidden="true"></span>
+        <div class="history-activity-copy"><strong id="historyActivityTitle"></strong><small id="historyActivityDetail"></small></div>
+        <progress id="historyActivityProgress" max="100"></progress>
+      </section>
       <div id="historyList" class="history-list" aria-live="polite"></div>
     </aside>
 
     <dialog id="projectDialog" class="new-canvas-dialog project-dialog" aria-labelledby="projectDialogTitle">
       <form id="projectForm">
         <header>
-          <div><span class="history-kicker">PenEcho</span><h2 id="projectDialogTitle" data-i18n="canvasProjectNew">New project</h2></div>
+          <h2 id="projectDialogTitle" data-i18n="canvasProjectNew">New project</h2>
           <button id="projectDialogClose" class="new-canvas-close" type="button" data-i18n-aria="cancel" aria-label="Cancel" data-i18n-title="cancel" title="Cancel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
         </header>
         <div class="new-canvas-fields project-dialog-fields">
@@ -227,9 +246,7 @@
           </label>
         </div>
         <div class="new-canvas-actions">
-          <div></div>
           <div class="new-canvas-action-group">
-            <button id="projectDialogCancel" type="button" data-i18n="cancel">Cancel</button>
             <button id="projectDialogCreate" class="new-canvas-primary" type="submit" data-i18n="canvasProjectNew">New project</button>
           </div>
         </div>
@@ -239,17 +256,18 @@
     <dialog id="newCanvasDialog" class="new-canvas-dialog" aria-labelledby="newCanvasTitle">
       <form method="dialog">
         <header>
-          <div><span class="history-kicker">PenEcho</span><h2 id="newCanvasTitle" data-i18n="newCanvasTitle">Start a new canvas?</h2></div>
+          <h2 id="newCanvasTitle" data-i18n="newCanvasTitle">Start a new canvas?</h2>
           <button id="newCanvasClose" class="new-canvas-close" type="button" data-i18n-aria="cancel" aria-label="Cancel" data-i18n-title="cancel" title="Cancel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
         </header>
         <p data-i18n="newCanvasDescription">Save confirmed content before starting over. Unconfirmed AI drafts are not included.</p>
-        <p id="currentSnapshotLabel" class="current-snapshot"></p>
+        <p id="currentSnapshotLabel" class="current-snapshot" hidden></p>
         <div class="new-canvas-fields">
           <fieldset class="snapshot-location" aria-describedby="newCanvasStorageDescription">
             <legend data-i18n="saveLocation">Save location</legend>
             <div class="snapshot-location-options">
               <label><input type="radio" name="newCanvasStorageLocation" value="device"><span data-i18n="storageThisDevice">This device</span></label>
               <label><input type="radio" name="newCanvasStorageLocation" value="server"><span data-i18n="storagePenEchoServer">PenEcho server</span></label>
+              <label><input type="radio" name="newCanvasStorageLocation" value="cloud"><span data-i18n="storagePenEchoCloud">PenEcho Cloud</span></label>
             </div>
             <p id="newCanvasStorageDescription" class="snapshot-location-description"></p>
           </fieldset>
@@ -263,7 +281,6 @@
         <div class="new-canvas-actions">
           <button id="newDiscard" class="new-canvas-discard" type="button" data-i18n="newWithoutSave">Don't save</button>
           <div class="new-canvas-action-group">
-            <button id="newCanvasCancel" type="button" data-i18n="cancel">Cancel</button>
             <button id="newOverwrite" type="button" data-i18n="overwriteAndCreate">Overwrite current</button>
             <button id="newSaveCopy" class="new-canvas-primary" type="button" data-i18n="saveAsNewAndCreate">Save as new</button>
           </div>
@@ -281,7 +298,6 @@
         <ul>
           <li data-i18n="textHelpMarkdown">Use # for headings, - for lists, **text** for bold, and *text* for italic.</li>
           <li data-i18n="textHelpMath">Common bare TeX such as \pi, \frac{a}{b}, A_x, and \sin(x) is recognized without $ delimiters.</li>
-          <li data-i18n="textHelpConfirm">Press Ctrl/Cmd + Enter to confirm.</li>
         </ul>
         <section class="text-help-example" aria-labelledby="textHelpExampleTitle">
           <h3 id="textHelpExampleTitle" data-i18n="textHelpExampleTitle">Example</h3>
@@ -289,9 +305,6 @@
 **Speed:** $v=\frac{d}{t}$
 - Area: $A=\pi r^2$</code></pre>
         </section>
-        <footer class="new-canvas-actions text-help-actions">
-          <button id="textHelpDone" class="new-canvas-primary" type="button" data-i18n="textHelpDone">Got it</button>
-        </footer>
       </form>
     </dialog>
 
@@ -382,6 +395,26 @@
       <span id="canvasHint" class="canvas-hint" role="status" aria-live="polite" hidden></span>
     </footer>
   </main>
+    <div id="craftsPopover" class="plugin-modal-layer" hidden aria-hidden="true">
+    <div class="plugin-modal crafts-modal" role="dialog" aria-modal="true" aria-labelledby="craftsTitle">
+      <header class="crafts-head">
+        <div class="crafts-title-row">
+          <h2 id="craftsTitle" data-i18n="savedCraftsTitle">Favorites</h2>
+          <div id="craftsFilters" class="crafts-filter-tabs" role="tablist" data-i18n-aria="savedCraftsTitle" aria-label="Favorites">
+            <button id="craftsFilterAll" class="crafts-filter-tab active" type="button" role="tab" aria-selected="true" aria-controls="craftsList" tabindex="0" data-i18n="all">All</button>
+            <button id="craftsFilterWidgets" class="crafts-filter-tab" type="button" role="tab" aria-selected="false" aria-controls="craftsList" tabindex="-1" data-i18n="widgets">Widgets</button>
+            <button id="craftsFilterCanvases" class="crafts-filter-tab" type="button" role="tab" aria-selected="false" aria-controls="craftsList" tabindex="-1" data-i18n="canvases">Canvases</button>
+          </div>
+          <span id="craftsRefreshStatus" class="crafts-refresh-status" role="status" aria-live="polite" hidden>
+            <span class="crafts-refresh-spinner" aria-hidden="true"></span>
+            <span data-i18n="savedRefreshing">Refreshing…</span>
+          </span>
+        </div>
+        <button id="craftsClose" class="cloud-dialog-close" type="button" data-i18n-aria="closeSavedCrafts" aria-label="Close Favorites" data-i18n-title="closeSavedCrafts" title="Close Favorites">×</button>
+      </header>
+      <div id="craftsList" class="crafts-list" aria-live="polite"><p class="crafts-empty" data-i18n="savedLoading">Loading favorites…</p></div>
+    </div>
+  </div>
   <div id="pluginPopover" class="plugin-modal-layer" hidden aria-hidden="true">
     <section class="plugin-modal" role="dialog" aria-modal="true" aria-labelledby="pluginDialogTitle" aria-describedby="pluginDialogDescription" tabindex="-1">
       <header class="plugin-modal-header">
@@ -417,7 +450,7 @@
             <h3 data-i18n="createPluginTitle">Create a local plugin</h3>
             <p data-i18n="createPluginDescription">Preview: this workflow has limited testing. Describe the capability in the template, then preferably use Improve with AI before saving.</p>
           </div>
-          <button class="plugin-share-button" type="button" disabled data-i18n="sharePluginComing">Share for points · Coming soon</button>
+          <button class="plugin-share-button" type="button" disabled data-i18n="sharePluginComing">Share to Community · Coming soon</button>
         </div>
         <form id="pluginCreateForm" class="plugin-create-form">
           <fieldset class="plugin-template-fieldset">
@@ -460,12 +493,12 @@
             <button id="pluginSave" class="plugin-primary-action" type="submit" data-i18n="saveAndEnablePlugin">Save and enable</button>
           </div>
         </form>
-        <p class="plugin-marketplace-note" data-i18n="pluginMarketplaceNote">The future marketplace will support free or points-priced downloads. Authors will be able to share plugins and earn points.</p>
+        <p class="plugin-marketplace-note" data-i18n="pluginMarketplaceNote">The future Community library will let authors share plugins for everyone to use free.</p>
       </section>
       <section id="pluginServerPanel" class="plugin-panel plugin-server-panel" role="tabpanel" aria-labelledby="pluginServerTab" hidden>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18h10a4 4 0 0 0 .7-7.9A6 6 0 0 0 6.4 8.5 4.8 4.8 0 0 0 7 18Z"/><path d="M9 14h6M12 11v6"/></svg>
         <h3 data-i18n="serverPluginsComingTitle">Server plugin marketplace is coming</h3>
-        <p data-i18n="serverPluginsComingDescription">Published plugins, free or points-priced downloads, server selection, trust details, and updates will appear here after the PenEcho website launches.</p>
+        <p data-i18n="serverPluginsComingDescription">Free community plugins, server selection, trust details, and updates will appear here after the PenEcho website launches.</p>
       </section>
     </section>
   </div>
@@ -554,13 +587,11 @@
             </select>
           </label>
         </section>
-        <section class="settings-group" aria-labelledby="settingsSummonHeading">
-          <h3 id="settingsSummonHeading" data-i18n="settingsSummonSection">Thinking indicator</h3>
+        <section class="settings-group" aria-labelledby="summonToggleLabel">
           <div class="settings-row">
-            <span id="summonToggleLabel" data-i18n="settingsSummonEnabled">Show while AI thinks</span>
+            <span id="summonToggleLabel" data-i18n="settingsSummonSection">Thinking indicator</span>
             <button id="summonToggle" class="settings-switch on" type="button" role="switch" aria-checked="true" aria-labelledby="summonToggleLabel"><span class="settings-switch-thumb" aria-hidden="true"></span></button>
           </div>
-          <p class="settings-note" data-i18n="settingsSummonDescription">A changing mathematical form and quiet text appear while each request runs.</p>
         </section>
         <section class="settings-group" aria-labelledby="settingsHelpHeading">
           <h3 id="settingsHelpHeading" data-i18n="settingsHelpSection">Help &amp; about</h3>
@@ -611,46 +642,29 @@
     </section>
   </div>
   <div id="changelogLayer" class="changelog-layer" hidden aria-hidden="true">
-    <section id="changelogDialog" class="changelog-dialog" role="dialog" aria-modal="true" data-i18n-aria="changelogDialog" aria-label="PenEcho release notes" aria-labelledby="changelogTitle" aria-describedby="changelogIntro" tabindex="-1">
+    <section id="changelogDialog" class="changelog-dialog" role="dialog" aria-modal="true" data-i18n-aria="changelogDialog" aria-label="PenEcho release notes" aria-labelledby="changelogTitle" tabindex="-1">
       <header class="changelog-header">
         <div class="changelog-heading">
           <span class="changelog-badge" data-i18n="changelogBadge">What's new</span>
-          <span class="changelog-version">0.9.0</span>
+          <span class="changelog-version">1.0.0</span>
         </div>
         <button id="changelogClose" class="changelog-close" type="button" data-i18n-aria="changelogClose" aria-label="Close release notes" data-i18n-title="changelogClose" title="Close release notes">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
         </button>
       </header>
       <div class="changelog-scroll">
-        <h2 id="changelogTitle" data-i18n="changelogTitle">Refine, projects, and flexible AI connections</h2>
-        <p id="changelogIntro" class="changelog-intro" data-i18n="changelogIntro">Version 0.9.0 adds guided in-place editing, project-based shared canvases, and a more flexible and dependable AI workflow.</p>
-        <div class="changelog-demo">
-          <img src="https://github.com/penecho/penecho/releases/download/v0.1.0/penecho_plugins.webp" alt="PenEcho professional diagrams demo" loading="eager" decoding="async">
-        </div>
-        <section class="changelog-release" aria-labelledby="changelogCurrentVersion">
-          <h3 id="changelogCurrentVersion">0.9.0</h3>
+        <h2 id="changelogTitle" data-i18n="changelogTitle">Local-first Cloud and Echoes</h2>
+        <section class="changelog-release">
           <ul>
-            <li data-i18n="changelogConnections">Save up to ten API or CLI connections, start from Kimi and MiniMax presets, test them in Canvas, and switch the active connection for this device with one click.</li>
-            <li data-i18n="changelogProjects">Organize shared server canvases into projects and browse larger previews by modification time. Versioned v2 bundles keep every canvas asset together while remaining compatible with existing saves.</li>
-            <li data-i18n="changelogRefine">Write or place instructions anywhere in the current viewport, choose the widget to update, and apply a standard unified diff that reduces tokens while preserving confirmation, undo, and pending instructions after failure or cancellation.</li>
-            <li data-i18n="changelogStreaming">API requests now use true SSE streaming, reducing long silent waits, improving responsiveness, and keeping lengthy model responses more stable through compatible gateways.</li>
-            <li data-i18n="changelogProgress">The top status area now shows each request stage, live response receipt, retries, long-wait notices, and cancellation; the magic button can stop active requests immediately.</li>
+            <li data-i18n="changelogLocalCloud">Open Cloud and favorite Canvases locally; add favorite Widgets to your current Canvas.</li>
+            <li data-i18n="changelogEchoes">Publish to Echoes, Echo shared work, and share Widgets or Canvases as images.</li>
           </ul>
         </section>
-        <section class="changelog-release changelog-earlier" aria-labelledby="changelogEarlierTitle">
-          <h3 id="changelogEarlierTitle" data-i18n="changelogEarlierTitle">Earlier highlights</h3>
-          <ul>
-            <li data-i18n="changelogImagesSummary">0.8.1 added live public-data access for General HTML widgets and SVG-first animation and complex graphics.</li>
-            <li data-i18n="changelogPluginsSummary">0.8.0 and earlier added editable professional diagrams, server-backed canvas storage, clipboard workflows, sourced web photos, and more reliable editing and export.</li>
-          </ul>
-        </section>
-      </div>
-      <div class="changelog-actions">
-        <button id="changelogDone" type="button" data-i18n="changelogDone">Got it</button>
       </div>
     </section>
   </div>
   <script src="/api/config.js"></script>
+  <script src="remote-canvas.js"></script>
   <script src="locales/zh.js"></script>
   <script src="draw.js"></script>
   <script src="selection.js"></script>
@@ -660,5 +674,7 @@
   <script src="plugins.js"></script>
   <script src="summon.js"></script>
   <script src="app.js"></script>
+  <script src="cloud-connect.js"></script>
+  <script src="viewer.js" defer></script>
 </body>
 </html>
