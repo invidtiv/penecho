@@ -162,7 +162,7 @@ test("device credentials are stored separately and never returned by status", ()
     assert.equal(saved.deviceToken, "device-secret-token");
     assert.equal(saved.token, undefined);
     assert.equal(saved.AI_API_KEY, undefined);
-    assert.equal(fs.statSync(path.join(stateDir, "cloud-device.json")).mode & 0o777, 0o600);
+    if (process.platform !== "win32") assert.equal(fs.statSync(path.join(stateDir, "cloud-device.json")).mode & 0o777, 0o600);
     connector.disconnect({ forget: true });
     assert.equal(fs.existsSync(path.join(stateDir, "cloud-device.json")), false);
   } finally {
@@ -186,7 +186,7 @@ test("legacy device files migrate without exposing the credential", () => {
     assert.equal(connector.configuration.deviceToken, "legacy-device-secret");
     assert.equal("token" in connector.configuration, false);
     assert.doesNotMatch(JSON.stringify(connector.status()), /legacy-device-secret/);
-    assert.equal(fs.statSync(path.join(stateDir, "cloud-device.json")).mode & 0o777, 0o600);
+    if (process.platform !== "win32") assert.equal(fs.statSync(path.join(stateDir, "cloud-device.json")).mode & 0o777, 0o600);
   } finally {
     fs.rmSync(stateDir, { recursive: true, force: true });
   }
@@ -687,7 +687,7 @@ test("browser account sign-in preserves the current LAN callback before storing 
     assert.equal(signedIn.browserSignIn.pending, false);
     const saved = JSON.parse(fs.readFileSync(path.join(stateDir, "cloud-device.json"), "utf8"));
     assert.equal(saved.accountToken, "browser-local-access-token");
-    assert.equal(fs.statSync(path.join(stateDir, "cloud-device.json")).mode & 0o777, 0o600);
+    if (process.platform !== "win32") assert.equal(fs.statSync(path.join(stateDir, "cloud-device.json")).mode & 0o777, 0o600);
   } finally {
     global.fetch = originalFetch;
     fs.rmSync(stateDir, { recursive: true, force: true });
@@ -1136,7 +1136,7 @@ test("relay reports only a bounded non-sensitive model capability after authenti
   try {
     await new Promise((resolve) => server.once("listening", resolve));
     const address = server.address();
-    connector = new CloudConnector({ stateDir, executeRequest:async () => ({}), defaultOrigin:`http://127.0.0.1:${address.port}`, capabilities:{ modelConfigured:true, provider:"must-not-leave-device" } });
+    connector = new CloudConnector({ stateDir, executeRequest:async () => ({}), executeCanvasAgentRequest:async () => ({}), defaultOrigin:`http://127.0.0.1:${address.port}`, capabilities:{ modelConfigured:true, provider:"must-not-leave-device" } });
     connector.writeConfiguration({ origin:`http://127.0.0.1:${address.port}`, deviceToken:"capability-device-token", deviceId:"capability-device", deviceName:"Capability host", enabled:true });
     const accepted = new Promise((resolve) => server.once("connection", resolve));
     connector.start();
@@ -1146,11 +1146,29 @@ test("relay reports only a bounded non-sensitive model capability after authenti
       if (message.type === "capabilities") resolve(message);
     }));
     remoteSocket.send(JSON.stringify({ type:"hello", protocol:1, deviceId:"capability-device", heartbeatSeconds:30 }));
-    assert.deepEqual(await capabilityMessage, { type:"capabilities", capabilities:{ modelConfigured:true } });
+    assert.deepEqual(await capabilityMessage, { type:"capabilities", capabilities:{ modelConfigured:true, canvasAgent:true } });
   } finally {
     connector?.close();
     await new Promise((resolve) => server.close(resolve));
     fs.rmSync(stateDir, { recursive:true, force:true });
+  }
+});
+
+test("cloud relay routes PenEcho Agent channel operations to the dedicated local executor", async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "penecho-cloud-canvas-agent-relay-test-"));
+  try {
+    const calls=[], connector = new CloudConnector({
+      stateDir,
+      executeRequest:async () => { throw new Error("legacy AI executor must not receive PenEcho Agent traffic"); },
+      executeCanvasAgentRequest:async (payload, timeoutMs) => { calls.push({ payload, timeoutMs }); return { accepted:true }; },
+    });
+    let sent=null;
+    const socket={ readyState:WebSocket.OPEN, send:value => { sent=JSON.parse(value); } };
+    await connector.handleRequest(socket,{ type:"request", requestId:"agent-frame-1", timeoutMs:12345, payload:{ operation:"canvas.agent.frame", channelId:"channel-1", frame:"{}" } });
+    assert.deepEqual(calls,[{ payload:{ operation:"canvas.agent.frame", channelId:"channel-1", frame:"{}" }, timeoutMs:12345 }]);
+    assert.deepEqual(sent,{ type:"response", requestId:"agent-frame-1", ok:true, payload:{ accepted:true } });
+  } finally {
+    fs.rmSync(stateDir,{ recursive:true, force:true });
   }
 });
 

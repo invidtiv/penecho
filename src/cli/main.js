@@ -12,6 +12,7 @@ const { apiReasoningParameters, reasoningEffortMapping } = require("../providers
 const { callCodexCli, resolveCodexLaunch } = require("../providers/codex-cli.js");
 const { callClaudeCli, resolveClaudeLaunch } = require("../providers/claude-cli.js");
 const { callKimiCli, resolveKimiLaunch } = require("../providers/kimi-cli.js");
+const { cliCandidates, cliDefinition } = require("../providers/cli-discovery.js");
 const { isPromptExit, runConfigureMenu } = require("./configure-ui.js");
 const { maybeUpdateOnStart } = require("./update.js");
 
@@ -24,14 +25,26 @@ const MAX_COMMAND_OUTPUT = 1024 * 1024;
 const REQUIRED_ASSETS = [
   "server.js",
   "src/server/main.js", "src/server/typeset.js", "src/server/api-config.js",
+  "src/server/canvas-agent/http.js", "src/server/canvas-agent/protocol.mjs", "src/server/canvas-agent/runtime.mjs",
   "src/cli/update.js", "src/cli/configure-ui.js",
-  "src/providers/kimi-cli.js", "src/providers/kimi-acp.js", "src/providers/codex-cli.js", "src/providers/claude-cli.js",
+  "src/providers/cli-discovery.js", "src/providers/cli-inspection.js", "src/providers/kimi-cli.js", "src/providers/kimi-acp.js", "src/providers/codex-cli.js", "src/providers/claude-cli.js",
   "public/index.html", "public/access.html", "public/access.css", "public/access.js", "public/app.js", "public/draw.js", "public/selection.js", "public/tour.js", "public/style.css",
 ];
 
 const PROVIDER_OPTIONS = "api, kimi-cli, codex-cli, or claude-cli";
-const KIMI_INSTALL_GUIDANCE = "Kimi Code CLI is not available. Install it, sign in, then test the connection again:\n  macOS/Linux: curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash\n  Windows PowerShell: irm https://code.kimi.com/kimi-code/install.ps1 | iex\n  Verify: kimi --version\n  Authenticate: kimi login\n  Official guide: https://github.com/MoonshotAI/kimi-code";
+const CLI_UPGRADE_COMMANDS = Object.freeze({
+  "kimi-cli":Object.freeze({ posix:"curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash", win32:"irm https://code.kimi.com/kimi-code/install.ps1 | iex" }),
+  "codex-cli":Object.freeze({ posix:"curl -fsSL https://chatgpt.com/codex/install.sh | sh", win32:"irm https://chatgpt.com/codex/install.ps1 | iex" }),
+  "claude-cli":Object.freeze({ posix:"curl -fsSL https://claude.ai/install.sh | bash", win32:"irm https://claude.ai/install.ps1 | iex" }),
+});
+const CLI_LOGIN_COMMANDS = Object.freeze({ "kimi-cli":"kimi login", "codex-cli":"codex login", "claude-cli":"claude auth login" });
 const CLI_PREFLIGHT_TIMEOUT_MS = 30000;
+
+function cliUpgradeCommand(provider, platform = process.platform) {
+  const commands = CLI_UPGRADE_COMMANDS[provider];
+  if (!commands) throw new Error("Choose Kimi CLI, Codex CLI, or Claude CLI.");
+  return platform === "win32" ? commands.win32 : commands.posix;
+}
 
 function parsePort(value) {
   const text = String(value ?? "").trim();
@@ -323,14 +336,18 @@ async function runCodexPreflight(configuration, options = {}) {
   const runner = options.runner || runCaptured;
   let launch;
   try { launch = resolveCodexLaunch(configuration.env.CODEX_CLI_PATH || "codex", configuration.env); }
-  catch (error) { return { ok: false, error: error.message }; }
+  catch (error) { return { ok:false, issue:/not found|not a file/i.test(error.message) ? "missing" : "execution", error:error.message }; }
   try {
     const version = await runner(launch, ["--version"], { cwd: configuration.cwd, env: configuration.env, timeoutMs: CLI_PREFLIGHT_TIMEOUT_MS });
-    if (version.code !== 0) return { ok: false, error: "Codex CLI could not report its version." };
+    if (version.code !== 0) return { ok:false, issue:"execution", error:"Codex CLI could not report its version." };
     const login = await runner(launch, ["login", "status"], { cwd: configuration.cwd, env: configuration.env, timeoutMs: CLI_PREFLIGHT_TIMEOUT_MS });
-    if (login.code !== 0) return { ok: false, error: "Codex CLI is not logged in. Run `codex login`." };
+    if (login.code !== 0) {
+      const diagnostic = `${login.stdout || ""}\n${login.stderr || ""}`;
+      if (/not logged in|not authenticated|authentication required|login required/i.test(diagnostic)) return { ok:false, issue:"authentication", error:"Codex CLI is not logged in." };
+      return { ok:false, issue:"execution", error:"Codex CLI could not complete its login check." };
+    }
     return { ok: true, version: (version.stdout || version.stderr).trim().split(/\r?\n/, 1)[0] || "Codex CLI" };
-  } catch (error) { return { ok: false, error: `Codex CLI check failed: ${error.message}` }; }
+  } catch (error) { return { ok:false, issue:"execution", error:`Codex CLI check failed: ${error.message}` }; }
 }
 
 async function codexBundledModels(configuration, options = {}) {
@@ -351,34 +368,61 @@ async function runClaudePreflight(configuration, options = {}) {
   const runner = options.runner || runCaptured;
   let launch;
   try { launch = resolveClaudeLaunch(configuration.env.CLAUDE_CLI_PATH || "claude", configuration.env); }
-  catch (error) { return { ok: false, error: error.message }; }
+  catch (error) { return { ok:false, issue:/not found|not a file/i.test(error.message) ? "missing" : "execution", error:error.message }; }
   try {
     const version = await runner(launch, ["--version"], { cwd: configuration.cwd, env: configuration.env, timeoutMs: CLI_PREFLIGHT_TIMEOUT_MS });
-    if (version.code !== 0) return { ok: false, error: "Claude CLI could not report its version." };
+    if (version.code !== 0) return { ok:false, issue:"execution", error:"Claude CLI could not report its version." };
     const login = await runner(launch, ["auth", "status"], { cwd: configuration.cwd, env: configuration.env, timeoutMs: CLI_PREFLIGHT_TIMEOUT_MS });
-    if (login.code !== 0) return { ok: false, error: "Claude CLI is not logged in. Run `claude auth login`." };
+    if (login.code !== 0) {
+      const diagnostic = `${login.stdout || ""}\n${login.stderr || ""}`;
+      if (/not logged in|not authenticated|authentication required|login required/i.test(diagnostic)) return { ok:false, issue:"authentication", error:"Claude CLI is not logged in." };
+      return { ok:false, issue:"execution", error:"Claude CLI could not complete its authentication check." };
+    }
     return { ok: true, version: (version.stdout || version.stderr).trim().split(/\r?\n/, 1)[0] || "Claude CLI" };
-  } catch (error) { return { ok: false, error: `Claude CLI check failed: ${error.message}` }; }
+  } catch (error) { return { ok:false, issue:"execution", error:`Claude CLI check failed: ${error.message}` }; }
 }
 
 async function runKimiPreflight(configuration, options = {}) {
   const runner = options.runner || runCaptured;
   let launch;
   try { launch = resolveKimiLaunch(configuration.env.KIMI_CLI_PATH || "kimi", configuration.env); }
-  catch (error) { return { ok:false, error:`${error.message}\n${KIMI_INSTALL_GUIDANCE}` }; }
+  catch (error) { return { ok:false, issue:/not found|not a file/i.test(error.message) ? "missing" : "execution", error:error.message }; }
   try {
     const env = { ...configuration.env, KIMI_CODE_NO_AUTO_UPDATE:"1" },
       version = await runner(launch, ["--version"], { cwd:configuration.cwd, env, timeoutMs:CLI_PREFLIGHT_TIMEOUT_MS });
-    if (version.code !== 0) return { ok:false, error:`Kimi Code CLI could not report its version.\n${KIMI_INSTALL_GUIDANCE}` };
+    if (version.code !== 0) return { ok:false, issue:"execution", error:"Kimi Code CLI could not report its version." };
     return { ok:true, version:(version.stdout || version.stderr).trim().split(/\r?\n/, 1)[0] || "Kimi Code CLI" };
   } catch (error) {
-    return { ok:false, error:`Kimi Code CLI check failed: ${error.message}\n${KIMI_INSTALL_GUIDANCE}` };
+    return { ok:false, issue:"execution", error:`Kimi Code CLI check failed: ${error.message}` };
   }
+}
+
+function providerPreflight(provider) {
+  if (provider === "kimi-cli") return runKimiPreflight;
+  if (provider === "codex-cli") return runCodexPreflight;
+  if (provider === "claude-cli") return runClaudePreflight;
+  throw new Error("Choose Kimi CLI, Codex CLI, or Claude CLI.");
+}
+
+async function resolveCliPreflight(configuration, options = {}) {
+  const provider = configuration.provider, item = cliDefinition(provider), candidates = options.candidates || cliCandidates(provider, {
+    env:configuration.env, home:configuration.home, stateDir:configuration.stateDir, platform:options.platform,
+    configuredPath:configuration.env[item.envName],
+  }), failures = [], preflight = providerPreflight(provider);
+  if (!candidates.length) return { ok:false, issue:"missing", error:`${item.label} CLI was not found.`, failures };
+  for (const candidate of candidates) {
+    const candidateConfiguration = { ...configuration, env:{ ...configuration.env, [item.envName]:candidate.executable } },
+      result = await preflight(candidateConfiguration, { runner:options.runner });
+    if (result.ok) return { ...result, executable:candidate.executable, source:candidate.source, failures };
+    failures.push({ ...result, executable:candidate.executable, source:candidate.source });
+  }
+  const selected = failures.find(failure => failure.issue === "authentication") || failures[0];
+  return { ...selected, failures };
 }
 
 function checkNodeVersion() {
   const [major,minor]=process.versions.node.split(".",2).map(Number);
-  return Number.isInteger(major)&&Number.isInteger(minor)&&(major>18||major===18&&minor>=17);
+  return Number.isInteger(major)&&Number.isInteger(minor)&&(major>22||major===22&&minor>=19);
 }
 
 function checkAssets(packageRoot = PACKAGE_ROOT) {
@@ -460,6 +504,13 @@ function cliTestError(error) {
   return diagnostic ? `${message} ${diagnostic}`.slice(0, 800) : message.slice(0, 800);
 }
 
+function apiConnectionTestLabel(env, format) {
+  const preset = String(env.PENECHO_API_PRESET || "").trim().toLowerCase();
+  if (preset.startsWith("kimi-")) return "Kimi";
+  if (preset.startsWith("minimax-")) return "MiniMax";
+  return format === "openai" ? "OpenAI-compatible" : format;
+}
+
 async function testConfiguredProvider(configuration, options = {}) {
   const provider = configuration.provider;
   if (!["api", "kimi-cli", "codex-cli", "claude-cli"].includes(provider)) throw new Error(`AI_PROVIDER must be ${PROVIDER_OPTIONS}.`);
@@ -467,7 +518,7 @@ async function testConfiguredProvider(configuration, options = {}) {
     timeoutMs = Number.isFinite(requestedTimeoutMs) && requestedTimeoutMs > 0 ? requestedTimeoutMs : configuredTimeoutSeconds(configuration.env) * 1000;
   if (provider === "api") {
     const result = await (options.apiTester || testApiConnection)(configuration.env, { fetchImpl:options.fetchImpl, timeoutMs });
-    return `${result.format} API responded with HTTP ${result.status}.`;
+    return `${apiConnectionTestLabel(configuration.env, result.format)} API responded with HTTP ${result.status}.`;
   }
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), timeoutMs), atlasImage = configuredTestImage(configuration.env);
   try {
@@ -507,7 +558,7 @@ async function runDoctor(args, configuration, options = {}) {
   const output = options.output || process.stdout;
   let ready = true;
   const report = (ok, message) => { output.write(`[${ok ? "ok" : "fail"}] ${message}\n`); if (!ok) ready = false; };
-  report(checkNodeVersion(), `Node.js ${process.versions.node} (18.17+ required)`);
+  report(checkNodeVersion(), `Node.js ${process.versions.node} (22.19+ required)`);
   const missingAssets = checkAssets(configuration.packageRoot);
   report(missingAssets.length === 0, missingAssets.length ? `Missing PenEcho assets: ${missingAssets.join(", ")}` : "PenEcho assets are present");
   const port = await (options.portChecker || checkPortAvailable)(configuration.port, configuration.env.HOST || "0.0.0.0");
@@ -570,6 +621,47 @@ function schedulePostStartUpdate(server, argv, options, output, errorOutput) {
   return Promise.resolve(null);
 }
 
+function cliDisplayLabel(provider) {
+  return provider === "kimi-cli" ? "Kimi Code CLI" : provider === "codex-cli" ? "Codex CLI" : "Claude Code";
+}
+
+function cliRecovery(provider, issue, platform) {
+  if (issue === "authentication") return { action:`Authenticate ${cliDisplayLabel(provider)}`, command:CLI_LOGIN_COMMANDS[provider] };
+  return { action:`Upgrade or repair ${cliDisplayLabel(provider)}`, command:cliUpgradeCommand(provider, platform) };
+}
+
+function applyResolvedCli(configuration, server, result) {
+  const item = cliDefinition(configuration.provider);
+  configuration.env[item.envName] = result.executable;
+  process.env[item.envName] = result.executable;
+  if (typeof server?.applyCliResolution === "function") server.applyCliResolution(configuration.provider, result.executable);
+}
+
+async function runPostStartCliPreflight(server, configuration, options, output, errorOutput) {
+  const result = await resolveCliPreflight(configuration, options), label = cliDisplayLabel(configuration.provider), item = cliDefinition(configuration.provider);
+  if (result.ok) {
+    applyResolvedCli(configuration, server, result);
+    const source = result.source === "managed" ? "PenEcho-managed" : result.source === "system" ? "system" : "configured";
+    output.write(`PenEcho is using the ${source} ${label} (${result.version}).\n`);
+    return result;
+  }
+  const recovery = cliRecovery(configuration.provider, result.issue, options.platform);
+  errorOutput.write(`PenEcho ${item.label} check warning: ${result.error}\n${recovery.action}:\n  ${recovery.command}\nPenEcho has started, but ${item.label} requests may fail until this is resolved. Run \`penecho doctor --${item.doctor}\` for full diagnostics.\n`);
+  return result;
+}
+
+function schedulePostStartCliPreflight(server, configuration, options, output, errorOutput) {
+  if (!configuration.provider?.endsWith("-cli")) return Promise.resolve(null);
+  const task = runPostStartCliPreflight(server, configuration, options, output, errorOutput).catch(error => {
+    const item = cliDefinition(configuration.provider), recovery = cliRecovery(configuration.provider, "execution", options.platform);
+    errorOutput.write(`PenEcho ${item.label} check warning: ${error.message}\n${recovery.action}:\n  ${recovery.command}\nPenEcho has started, but ${item.label} requests may fail until this is resolved.\n`);
+    return { ok:false, issue:"execution", error:error.message };
+  });
+  if (typeof server?.setCliResolutionTask === "function") server.setCliResolutionTask(configuration.provider, task);
+  if (options.awaitCliPreflight) return task;
+  return Promise.resolve(null);
+}
+
 
 function helpText() {
   return `PenEcho ${PACKAGE_JSON.version}\n\nUsage:\n  penecho [--config FILE] [--port 3888]\n  penecho configure [--config FILE]\n  penecho doctor [--api|--kimi|--codex|--claude] [--config FILE]\n  penecho --kimi [--model MODEL] [--effort LEVEL]\n  penecho --codex [--model MODEL] [--effort LEVEL]\n  penecho --claude [--model MODEL] [--effort LEVEL]\n\nOptions:\n  --config <file>   Use this configuration file instead of ~/.penecho/config.env\n  --api             Use an OpenAI-compatible or Anthropic-compatible API\n  --kimi            Use the authenticated Kimi Code CLI\n  --codex           Use the authenticated Codex CLI\n  --claude          Use the authenticated Claude CLI\n  --model <model>   Override the model for a CLI mode\n  --effort <level>  Override reasoning effort with a known or CLI-supported value\n  --port <port>     Override the configured listening port\n  -h, --help        Show help\n  -v, --version     Show version\n\nRun \`penecho configure\` for the interactive configuration center. Known effort values include none, low, medium, high, xhigh, and max; other strings are passed through.\n\nKimi Code CLI installation (run these yourself):\n  macOS/Linux: curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash\n  Windows PowerShell: irm https://code.kimi.com/kimi-code/install.ps1 | iex\n  Then: kimi --version && kimi login\n  Official guide: https://github.com/MoonshotAI/kimi-code\n\nExamples:\n  penecho configure\n  penecho\n  penecho --config ./team.env\n  penecho --kimi\n  penecho --codex --model gpt-5.6-sol --effort xhigh\n`;
@@ -582,6 +674,10 @@ async function main(argv = process.argv.slice(2), options = {}) {
   catch (error) { errorOutput.write(`PenEcho: ${error.message}\nRun \`penecho --help\` for usage.\n`); return 1; }
   if (args.help) { output.write(helpText()); return 0; }
   if (args.version) { output.write(`${PACKAGE_JSON.version}\n`); return 0; }
+  if (!checkNodeVersion()) {
+    errorOutput.write(`PenEcho requires Node.js 22.19 or newer for the embedded DeepSeek Harness (current: ${process.versions.node}).\n`);
+    return 1;
+  }
   if (args.command === "start") {
     output.write(`PenEcho v${PACKAGE_JSON.version}\n`);
     if (args.uat) output.write(`PenEcho Cloud target: UAT (${UAT_CLOUD_ORIGIN})\n`);
@@ -635,36 +731,21 @@ async function main(argv = process.argv.slice(2), options = {}) {
       errorOutput.write(`PenEcho API configuration is incomplete: ${issues.join(", ")}.\nRun \`penecho configure\` to correct it.\n`);
       return 1;
     }
-  } else if (configuration.provider === "kimi-cli") {
-    const kimi = await runKimiPreflight(configuration, { runner:options.runner });
-    if (!kimi.ok) {
-      errorOutput.write(`PenEcho Kimi check failed: ${kimi.error}\nRun \`penecho doctor --kimi\` for full diagnostics.\n`);
-      return 1;
-    }
-    output.write(`PenEcho is using Kimi CLI (${kimi.version}).\nIf Canvas requests cannot reach Kimi, verify or install the CLI yourself:\n  macOS/Linux: curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash\n  Windows PowerShell: irm https://code.kimi.com/kimi-code/install.ps1 | iex\n  Verify: kimi --version\n  Authenticate: kimi login\n  Official guide: https://github.com/MoonshotAI/kimi-code\n`);
-  } else if (configuration.provider === "codex-cli") {
-    const codex = await runCodexPreflight(configuration, { runner: options.runner });
-    if (!codex.ok) {
-      errorOutput.write(`PenEcho Codex check failed: ${codex.error}\nRun \`penecho doctor --codex\` for full diagnostics.\n`);
-      return 1;
-    }
-  } else {
-    const claude = await runClaudePreflight(configuration, { runner: options.runner });
-    if (!claude.ok) {
-      errorOutput.write(`PenEcho Claude check failed: ${claude.error}\nRun \`penecho doctor --claude\` for full diagnostics.\n`);
-      return 1;
-    }
   }
   configuration.env.PENECHO_CONFIG_FILE = configuration.configFile;
   applyConfiguration(configuration.env);
   let startedServer;
   if (options.startServer) {
     startedServer = await options.startServer(configuration);
+    await schedulePostStartCliPreflight(startedServer, configuration, options, output, errorOutput);
     const update = await schedulePostStartUpdate(startedServer, argv, options, output, errorOutput);
     if (update?.exitCode) return update.exitCode;
   } else {
     startedServer = require("../../server.js");
-    const schedule = () => { void schedulePostStartUpdate(startedServer, argv, options, output, errorOutput); };
+    const schedule = () => {
+      void schedulePostStartCliPreflight(startedServer, configuration, options, output, errorOutput);
+      void schedulePostStartUpdate(startedServer, argv, options, output, errorOutput);
+    };
     if (startedServer?.listening) schedule();
     else if (typeof startedServer?.once === "function") startedServer.once("listening", schedule);
   }
@@ -682,6 +763,7 @@ module.exports = {
   apiConfigurationIssues,
   checkAssets,
   checkPortAvailable,
+  cliCandidates,
   codexBundledModels,
   configuredTimeoutSeconds,
   helpText,
@@ -690,6 +772,7 @@ module.exports = {
   parseArgs,
   parseEnvText,
   resolveConfiguration,
+  resolveCliPreflight,
   runCodexPreflight,
   runClaudePreflight,
   runKimiPreflight,

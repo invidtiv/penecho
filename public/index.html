@@ -7,6 +7,7 @@
   <link rel="icon" href="data:,">
   <title>PenEcho | Handwritten AI Canvas</title>
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="canvas-agent-activity.css">
   <link rel="stylesheet" href="cloud-connect.css">
   <link rel="stylesheet" href="remote-canvas.css">
   <link rel="stylesheet" href="viewer.css">
@@ -103,12 +104,6 @@
               </div>
             </div>
           </div>
-          <div id="pluginControl" class="plugin-control">
-            <button id="pluginButton" class="plugin-trigger" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="pluginPopover" data-i18n-aria="plugins" aria-label="Plugins" data-i18n-title="plugins" title="Plugins">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4h3a2 2 0 1 1 4 0h3a2 2 0 0 1 2 2v3a2 2 0 1 0 0 4v3a2 2 0 0 1-2 2h-3a2 2 0 1 1-4 0H8a2 2 0 0 1-2-2v-3a2 2 0 1 0 0-4V6a2 2 0 0 1 2-2Z"/></svg>
-              <span data-i18n="plugins">Plugins</span>
-            </button>
-          </div>
           <div id="craftsControl" class="plugin-control">
             <button id="craftsButton" class="plugin-trigger crafts-trigger" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="craftsPopover" data-i18n-aria="savedCrafts" aria-label="Favorites" data-i18n-title="savedCrafts" title="Favorites">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
@@ -116,15 +111,29 @@
           </div>
           </div>
           <div class="mode-tools">
+            <button id="canvasViewBtn" class="icon-button" type="button" aria-pressed="false" data-i18n-aria="enterCanvasViewMode" aria-label="View canvas" data-i18n-title="enterCanvasViewMode" title="View canvas">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.8"/></svg>
+            </button>
             <button id="handToolBtn" data-mode="hand" class="icon-button" type="button" aria-pressed="false" data-i18n-aria="hand" aria-label="Hand tool: move canvas and objects" data-i18n-title="hand" title="Hand tool: move canvas and objects">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 11V6a2 2 0 0 0-4 0v5"/><path d="M14 10V4a2 2 0 0 0-4 0v8"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M6 13.5 5.9 12a2 2 0 0 0-4 0c0 .7.1 1.5.2 2l.8 5a6 6 0 0 0 6 5h2a8 8 0 0 0 8-8v-5a2 2 0 1 0-4 0v1"/></svg>
             </button>
             <button data-mode="pen" class="active icon-button" type="button" aria-pressed="true" data-i18n-aria="pen" aria-label="Pen" data-i18n-title="pen" title="Pen">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.5-1 10-10a2.1 2.1 0 0 0-3-3l-10 10L4 20Z"/><path d="m14.5 7.5 3 3"/></svg>
             </button>
-            <button data-mode="eraser" class="icon-button" type="button" aria-pressed="false" data-i18n-aria="eraser" aria-label="Eraser" data-i18n-title="eraser" title="Eraser">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 20-4-4L14 5a2 2 0 0 1 3 0l2 2a2 2 0 0 1 0 3L9 20H7Z"/><path d="m11 8 6 6M7 20h12"/></svg>
-            </button>
+            <div id="eraserToolControl" class="eraser-tool-control">
+              <button id="eraserToolBtn" data-mode="eraser" data-active-eraser="eraser" class="icon-button" type="button" aria-pressed="false" aria-haspopup="menu" aria-expanded="false" aria-controls="eraserToolMenu" data-i18n-aria="eraser" aria-label="Eraser" data-i18n-title="eraser" title="Eraser">
+                <svg data-eraser-icon="freehand" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 20-4-4L14 5a2 2 0 0 1 3 0l2 2a2 2 0 0 1 0 3L9 20H7Z"/><path d="m11 8 6 6M7 20h12"/></svg>
+                <svg data-eraser-icon="area" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2" stroke-dasharray="3 2"/><path d="m9 15-2-2 5-5a1.4 1.4 0 0 1 2 0l2 2a1.4 1.4 0 0 1 0 2l-3 3H9ZM9 15h7"/></svg>
+              </button>
+              <div id="eraserToolMenu" class="eraser-tool-menu" role="menu" data-i18n-aria="eraserOptions" aria-label="Eraser options" hidden>
+                <button id="eraserFreehandBtn" class="eraser-tool-option" type="button" role="menuitemradio" aria-checked="true" data-eraser-mode="eraser" data-i18n-aria="eraser" aria-label="Eraser" data-i18n-title="eraser" title="Eraser">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 20-4-4L14 5a2 2 0 0 1 3 0l2 2a2 2 0 0 1 0 3L9 20H7Z"/><path d="m11 8 6 6M7 20h12"/></svg>
+                </button>
+                <button id="eraserAreaBtn" class="eraser-tool-option" type="button" role="menuitemradio" aria-checked="false" data-eraser-mode="area-eraser" data-i18n-aria="areaEraser" aria-label="Area erase" data-i18n-title="areaEraser" title="Area erase">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2" stroke-dasharray="3 2"/><path d="m9 15-2-2 5-5a1.4 1.4 0 0 1 2 0l2 2a1.4 1.4 0 0 1 0 2l-3 3H9ZM9 15h7"/></svg>
+                </button>
+              </div>
+            </div>
             <button id="lassoToolBtn" data-mode="select" class="icon-button" type="button" aria-pressed="false" data-i18n-aria="select" aria-label="Lasso select" data-i18n-title="select" title="Lasso select">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18.5 5.5c3.2 3.1-.8 7.5-5.1 8.8-4.9 1.5-11.2-.1-10.2-4.5.8-3.8 6.6-5.7 11.2-4.6 4.1 1 6.4 5 4.4 8.5-1.4 2.5-4.8 3.8-7.8 4.1"/><path d="m8 16 3 1.8-2.3 2.6"/></svg>
             </button>
@@ -312,6 +321,17 @@
       <div class="frame-corner corner-left" aria-hidden="true"></div>
       <div class="frame-corner corner-right" aria-hidden="true"></div>
       <section id="viewport" data-i18n-aria="canvas" aria-label="Zoomable handwritten AI canvas">
+        <div id="canvasViewActions" class="canvas-view-actions" role="toolbar" data-i18n-aria="canvasViewModeActions" aria-label="View mode actions" hidden>
+          <button id="canvasViewShareBtn" type="button" data-i18n-aria="shareCanvasCloud" aria-label="Share Canvas to PenEcho Cloud" data-i18n-title="shareCanvasCloud" title="Share Canvas to PenEcho Cloud">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="m8.3 10.8 7.4-4.5M8.3 13.2l7.4 4.5"/></svg>
+          </button>
+          <button id="canvasViewDownloadBtn" type="button" data-i18n-aria="exportPng" aria-label="Export PNG" data-i18n-title="exportPng" title="Export PNG">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 15v5h14v-5"/></svg>
+          </button>
+          <button id="canvasViewCloseBtn" type="button" data-i18n-aria="exitCanvasViewMode" aria-label="Exit view mode" data-i18n-title="exitCanvasViewMode" title="Exit view mode">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
         <button id="canvasNavigationLock" class="canvas-navigation-lock" type="button" aria-pressed="false" data-i18n-aria="canvasLockNavigation" aria-label="Lock canvas navigation" data-i18n-title="canvasLockNavigation" title="Lock canvas navigation">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path class="navigation-lock-shackle open" d="M8 10V7.5a4 4 0 0 1 7.7-1.5"/>
@@ -381,6 +401,152 @@
           </div>
         </div>
         <div id="canvasNavigationLockHint" class="canvas-navigation-lock-hint" data-i18n="canvasNavigationLockedHint">Canvas view locked · Click the top-left lock to unlock</div>
+        <canvas id="canvasAgentWidgetPickerLayer" class="canvas-agent-widget-picker-layer" width="1" height="1" aria-hidden="true" hidden></canvas>
+        <section id="canvasAgentPanel" class="canvas-agent-panel" role="dialog" data-i18n-aria="canvasAgent" aria-label="PenEcho Agent" aria-hidden="true" hidden>
+          <div id="canvasAgentResizeTop" class="canvas-agent-resize-edge top" role="separator" aria-orientation="horizontal" aria-controls="canvasAgentPanel" aria-valuemin="320" tabindex="0" data-edge="top" data-i18n-aria="canvasAgentResizeTop" aria-label="Resize PenEcho Agent from the top edge"></div>
+          <div id="canvasAgentResizeLeft" class="canvas-agent-resize-edge left" role="separator" aria-orientation="vertical" aria-controls="canvasAgentPanel" aria-valuemin="360" tabindex="0" data-edge="left" data-i18n-aria="canvasAgentResizeLeft" aria-label="Resize PenEcho Agent from the left edge"></div>
+          <div id="canvasAgentResizeRight" class="canvas-agent-resize-edge right" role="separator" aria-orientation="vertical" aria-controls="canvasAgentPanel" aria-valuemin="360" tabindex="0" data-edge="right" data-i18n-aria="canvasAgentResizeRight" aria-label="Resize PenEcho Agent from the right edge"></div>
+          <header id="canvasAgentHead" class="canvas-agent-head" data-i18n-title="canvasAgentMove" title="Drag to move PenEcho Agent">
+            <span class="canvas-agent-mark" aria-hidden="true"></span>
+            <div><strong data-i18n="canvasAgent">PenEcho Agent</strong><small id="canvasAgentStatus" data-i18n="canvasAgentReadyConnect">Ready to connect</small></div>
+            <button id="canvasAgentHistory" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="canvasAgentHistoryPopover" data-i18n-title="canvasAgentHistory" title="PenEcho Agent history" data-i18n-aria="canvasAgentHistory" aria-label="PenEcho Agent history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.5M4 4v4.5h4.5"/><path d="M12 8v4l2.5 1.5"/></svg></button>
+            <button id="canvasAgentNew" type="button" data-i18n-title="newCanvasAgentConversation" title="New PenEcho Agent conversation" data-i18n-aria="newCanvasAgentConversation" aria-label="New PenEcho Agent conversation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+            <button id="canvasAgentClose" type="button" data-i18n-title="closeCanvasAgent" title="Close PenEcho Agent" data-i18n-aria="closeCanvasAgent" aria-label="Close PenEcho Agent"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+          </header>
+          <dialog id="canvasAgentProjectPopover" class="canvas-agent-project-dialog" aria-labelledby="canvasAgentProjectTitle" aria-describedby="canvasAgentProjectDescription canvasAgentProjectBoundary">
+            <header class="canvas-agent-project-dialog-head">
+              <div>
+                <span class="canvas-agent-project-eyebrow" data-i18n="canvasAgentWorkspace">Workspace</span>
+                <h2 id="canvasAgentProjectTitle" data-i18n="canvasAgentProjectManager">Project manager</h2>
+                <p id="canvasAgentProjectDescription" data-i18n="canvasAgentProjectManagerDescription">Projects are folders. Files are added from the PenEcho Agent composer.</p>
+              </div>
+              <button id="canvasAgentProjectClose" class="canvas-agent-project-close" type="button" data-i18n-aria="canvasAgentProjectClose" aria-label="Close project manager"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+            </header>
+            <div class="canvas-agent-project-dialog-body">
+              <p id="canvasAgentProjectBoundary" class="canvas-agent-project-boundary">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.6 2.8 8.1 7 10 4.2-1.9 7-5.4 7-10V6z"/><path d="m9.5 12 1.7 1.7 3.6-3.9"/></svg>
+                <span data-i18n="canvasAgentProjectBoundary">This version supports read access only. For file safety, modifying files is not supported.</span>
+              </p>
+              <section class="canvas-agent-resource-group canvas-agent-project-group" aria-labelledby="canvasAgentProjectsTitle">
+                <header>
+                  <div>
+                    <span class="canvas-agent-resource-heading-icon folder" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3.5 7.5h6l2-2h9v13h-17z"/><path d="M3.5 9.5h17"/></svg></span>
+                    <span><strong id="canvasAgentProjectsTitle" data-i18n="canvasAgentProjects">Projects</strong><small data-i18n="canvasAgentProjectsDescription">A project is a folder the Agent can read while working.</small></span>
+                  </div>
+                  <button id="canvasAgentProjectCreate" class="canvas-agent-project-create" type="button" aria-expanded="false" aria-controls="canvasAgentProjectRoots"><span aria-hidden="true">+</span><span data-i18n="canvasAgentNewProject">New project</span></button>
+                </header>
+                <div class="canvas-agent-resource-count"><span id="canvasAgentProjectCount">0</span><span data-i18n="canvasAgentProjectFolders">project folders</span></div>
+                <div id="canvasAgentProjectList" class="canvas-agent-project-list"></div>
+                <section id="canvasAgentProjectRoots" class="canvas-agent-project-roots" hidden>
+                  <header><button id="canvasAgentProjectRootBack" type="button" data-i18n-aria="canvasAgentRootBack" aria-label="Back" hidden>←</button><strong id="canvasAgentProjectRootPath" data-i18n="canvasAgentServerFolders">Choose a project folder</strong></header>
+                  <small data-i18n="canvasAgentServerFoldersDetail">Select a host folder to register it as a read-only project.</small>
+                  <div id="canvasAgentProjectRootList" class="canvas-agent-project-root-list"></div>
+                  <section id="canvasAgentProjectRootApproval" class="canvas-agent-project-root-approval" role="alertdialog" aria-modal="false" data-i18n-aria="canvasAgentRootApprovalTitle" aria-label="Approve private folder access" hidden>
+                    <strong data-i18n="canvasAgentRootApprovalTitle">Approve private folder access?</strong>
+                    <small id="canvasAgentProjectRootApprovalDetail"></small>
+                    <div><button id="canvasAgentProjectRootApprovalReject" type="button" data-i18n="canvasAgentRootApprovalReject">Cancel</button><button id="canvasAgentProjectRootApprovalAllow" type="button" data-i18n="canvasAgentRootApprovalAllow">Allow once</button></div>
+                  </section>
+                  <button id="canvasAgentProjectRootSelect" class="canvas-agent-project-root-select" type="button" data-i18n="canvasAgentRootSelect" hidden>Use this folder</button>
+                  <small id="canvasAgentProjectRootTruncated" class="canvas-agent-project-root-truncated" data-i18n="canvasAgentRootTruncated" hidden>Some folders are not shown.</small>
+                </section>
+              </section>
+              <section class="canvas-agent-resource-group canvas-agent-file-group" aria-labelledby="canvasAgentFilesTitle">
+                <header>
+                  <div>
+                    <span class="canvas-agent-resource-heading-icon file" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h5"/></svg></span>
+                    <span><strong id="canvasAgentFilesTitle" data-i18n="canvasAgentFiles">Files</strong><small data-i18n="canvasAgentFilesDescription">Files already used with PenEcho Agent appear here.</small></span>
+                  </div>
+                </header>
+                <div class="canvas-agent-resource-count"><span id="canvasAgentFileCount">0</span><span data-i18n="canvasAgentKnownFiles">known files</span></div>
+                <div id="canvasAgentFileList" class="canvas-agent-project-list"></div>
+                <p class="canvas-agent-file-add-hint"><span class="canvas-agent-file-add-symbol" aria-hidden="true">+</span><span data-i18n="canvasAgentFilesAddHint">Add a file from the chat composer, or paste it with Ctrl/Cmd+V.</span></p>
+              </section>
+            </div>
+            <p id="canvasAgentProjectError" class="canvas-agent-project-error" role="alert" hidden></p>
+          </dialog>
+          <div id="canvasAgentHistoryPopover" class="canvas-agent-history-popover" role="menu" data-i18n-aria="canvasAgentHistory" aria-label="PenEcho Agent history" hidden>
+            <div id="canvasAgentHistoryList" class="canvas-agent-history-list"></div>
+          </div>
+          <div id="canvasAgentHistoryView" class="canvas-agent-history-view" hidden>
+            <span data-i18n="canvasAgentHistoryViewing">Viewing saved conversation</span>
+            <button id="canvasAgentHistoryReturn" type="button" data-i18n="canvasAgentHistoryReturn">Back to current conversation</button>
+          </div>
+          <div id="canvasAgentTranscript" class="canvas-agent-transcript" role="log" aria-live="polite" aria-relevant="additions text">
+            <div class="canvas-agent-empty"><strong data-i18n="canvasAgentEmptyTitle">Research, analyze, and create—all in one place.</strong><span data-i18n="canvasAgentEmptyBody">Analyze folders and files—including Excel, PowerPoint, PDF, and Word—and search the web. Use your current canvas as context for rich visual analyses and plans, or update it directly.</span></div>
+          </div>
+          <div id="canvasAgentSelection" class="canvas-agent-selection" data-i18n-aria="canvasAgentReferences" aria-label="Referenced canvas objects" hidden></div>
+          <div id="canvasAgentAttachments" class="canvas-agent-attachments" data-i18n-aria="canvasAgentAttachments" aria-label="Attachments" hidden></div>
+          <section id="canvasAgentApproval" class="canvas-agent-approval" role="alertdialog" aria-modal="false" data-i18n-aria="canvasAgentApproval" aria-label="Authorize project command" hidden>
+            <strong data-i18n="canvasAgentApprovalTitle">Authorize critical command?</strong>
+            <span id="canvasAgentApprovalReason"></span>
+            <pre id="canvasAgentApprovalCommand"></pre>
+            <div><button id="canvasAgentApprovalReject" type="button" data-i18n="canvasAgentApprovalReject">Reject</button><button id="canvasAgentApprovalAllow" type="button" data-i18n="canvasAgentApprovalAllow">Allow once</button></div>
+          </section>
+          <section id="canvasAgentPromptSuggestions" class="canvas-agent-prompt-suggestions" role="group" data-i18n-aria="canvasAgentPromptSuggestions" aria-label="Suggested prompts" hidden>
+            <header><button id="canvasAgentPromptToggle" type="button" aria-expanded="false" aria-controls="canvasAgentPromptPopup" data-i18n-title="canvasAgentPromptMore" title="Show suggested prompts" data-i18n-aria="canvasAgentPromptMore" aria-label="Show suggested prompts"><span data-i18n="canvasAgentPromptSuggestionsTitle">Try asking</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg></button></header>
+            <div id="canvasAgentPromptPopup" class="canvas-agent-prompt-popup" hidden>
+              <div id="canvasAgentAdditionalPromptList" class="canvas-agent-prompt-list canvas-agent-prompt-additional" hidden></div>
+              <div id="canvasAgentPrimaryPromptList" class="canvas-agent-prompt-list"></div>
+            </div>
+          </section>
+          <form id="canvasAgentForm" class="canvas-agent-composer">
+            <p id="canvasAgentInputHint" class="canvas-agent-input-hint" data-i18n="canvasAgentInputHint">Type or use the Pen button to write by hand. Reference a Widget, then ask Agent to extract canvas handwriting, inspect source, arrange content, or edit the Widget.</p>
+            <div class="canvas-agent-composer-surface">
+              <textarea id="canvasAgentInput" rows="1" maxlength="40000" data-i18n-placeholder="canvasAgentPlaceholder" placeholder="Ask PenEcho Agent…" data-i18n-aria="canvasAgentMessage" aria-label="Message PenEcho Agent" aria-describedby="canvasAgentInputHint"></textarea>
+              <div id="canvasAgentInkInput" class="canvas-agent-ink-input" hidden>
+                <canvas id="canvasAgentInkCanvas" width="1200" height="1040" tabindex="0" data-i18n-aria="canvasAgentHandwrite" aria-label="Handwrite a PenEcho Agent message"></canvas>
+                <button id="canvasAgentClearInk" class="canvas-agent-clear-ink" type="button" data-i18n="canvasAgentClearInk">Clear</button>
+              </div>
+              <section id="canvasAgentReferencePicker" class="canvas-agent-reference-picker" role="dialog" data-i18n-aria="canvasAgentReferenceWidget" aria-label="Reference a Widget" hidden>
+                <p id="canvasAgentReferenceHelp" class="canvas-agent-reference-help" data-i18n="canvasAgentReferenceHelp">Click a Widget on the canvas to add it automatically, or choose one below.</p>
+                <input id="canvasAgentReferenceSearch" type="search" data-i18n-placeholder="canvasAgentReferenceSearch" placeholder="Filter Widgets, or click one on the canvas" data-i18n-aria="canvasAgentReferenceSearch" aria-label="Filter Widgets, or click one on the canvas">
+                <div id="canvasAgentReferenceList" class="canvas-agent-reference-list" role="listbox" data-i18n-aria="canvasAgentReferenceWidget" aria-label="Canvas Widgets"></div>
+                <p id="canvasAgentReferenceNote" class="canvas-agent-reference-note"></p>
+              </section>
+              <footer class="canvas-agent-composer-actions">
+                <div class="canvas-agent-tool-actions">
+                  <button id="canvasAgentAttach" class="canvas-agent-attach" type="button" data-i18n-aria="canvasAgentAttach" aria-label="Attach files and images" data-i18n-title="canvasAgentAttachTitle" title="Attach up to five files and images">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 12 6-6a4 4 0 0 1 6 6l-8 8a6 6 0 0 1-8-8l8-8"/></svg>
+                    <span id="canvasAgentAttachmentCount" class="canvas-agent-attachment-count" hidden>0</span>
+                  </button>
+                  <div id="canvasAgentProjectControl" class="canvas-agent-project-control">
+                    <button id="canvasAgentProject" class="canvas-agent-project-button" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="canvasAgentProjectPopover" data-i18n-title="canvasAgentProject" title="Manage projects and files" data-i18n-aria="canvasAgentProject" aria-label="Manage projects and files">
+                      <svg class="canvas-agent-project-folder-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5h6l2-2h9v13h-17z"/><path d="M3.5 9.5h17"/></svg>
+                      <svg class="canvas-agent-project-file-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h5"/></svg>
+                      <span id="canvasAgentProjectLabel" data-i18n="canvasAgentNoProject">No project</span>
+                      <svg class="canvas-agent-project-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 14 4-4 4 4"/></svg>
+                    </button>
+                    <button id="canvasAgentProjectClear" class="canvas-agent-project-clear" type="button" aria-label="Clear selected resource" title="Clear selected resource" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17"/></svg></button>
+                  </div>
+                  <button id="canvasAgentReference" class="canvas-agent-reference" type="button" aria-expanded="false" aria-controls="canvasAgentReferencePicker" data-i18n-aria="canvasAgentReferenceWidget" aria-label="Reference a Widget" data-i18n-title="canvasAgentReferenceWidgetTitle" title="Pick a Widget to reference">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 12h8M12 8v8"/><rect x="4" y="4" width="16" height="16" rx="3"/></svg>
+                  </button>
+                  <button id="canvasAgentTextMode" class="canvas-agent-input-mode active" type="button" aria-pressed="true" data-i18n-aria="canvasAgentType" aria-label="Type with keyboard" data-i18n-title="canvasAgentType" title="Type with keyboard">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M12 6v12M8 18h8"/></svg>
+                  </button>
+                  <button id="canvasAgentInkMode" class="canvas-agent-input-mode" type="button" aria-pressed="false" data-i18n-aria="canvasAgentHandwrite" aria-label="Write by hand" data-i18n-title="canvasAgentHandwrite" title="Write by hand">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.5-1 10-10a2.1 2.1 0 0 0-3-3l-10 10L4 20Z"/><path d="m14.5 7.5 3 3"/></svg>
+                  </button>
+                  <button id="canvasAgentSearch" class="canvas-agent-search" type="button" aria-pressed="false" aria-disabled="true" data-i18n-aria="canvasAgentSearchUnavailable" aria-label="Internet search is unavailable in this build" data-tooltip="Internet search is unavailable in this build">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.4 2.5 3.6 5.5 3.6 9S14.4 18.5 12 21M12 3c-2.4 2.5-3.6 5.5-3.6 9S9.6 18.5 12 21"/></svg>
+                  </button>
+                  <input id="canvasAgentFileInput" type="file" multiple hidden>
+                </div>
+                <div class="canvas-agent-primary-actions">
+                  <button id="canvasAgentStop" class="canvas-agent-stop" type="button" data-i18n-aria="canvasAgentStop" aria-label="Stop" data-i18n-title="canvasAgentStop" title="Stop" hidden>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5"/></svg>
+                    <span class="canvas-agent-action-label" data-i18n="canvasAgentStop">Stop</span>
+                  </button>
+                  <button id="canvasAgentSend" class="canvas-agent-send" type="submit" data-i18n-aria="canvasAgentSend" aria-label="Send" data-i18n-title="canvasAgentSend" title="Send">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6.5 10.5 12 5l5.5 5.5"/></svg>
+                    <span class="canvas-agent-action-label" data-i18n="canvasAgentSend">Send</span>
+                  </button>
+                </div>
+              </footer>
+            </div>
+          </form>
+          <div id="canvasAgentResizeBottom" class="canvas-agent-resize-edge bottom" role="separator" aria-orientation="horizontal" aria-controls="canvasAgentPanel" aria-valuemin="320" tabindex="0" data-edge="bottom" data-i18n-aria="canvasAgentResizeBottom" aria-label="Resize PenEcho Agent from the bottom edge"></div>
+        </section>
         <div id="tip" data-i18n="tip">Pan: middle-mouse drag, Hand tool, or one finger · Zoom: wheel or pinch</div>
       </section>
     </section>
@@ -392,6 +558,12 @@
 
     <footer>
       <span id="coords">x 10000 · y 10000 · 100%</span>
+      <div id="canvasAgentControl" class="canvas-agent-control">
+        <button id="canvasAgentToggle" class="canvas-agent-trigger" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="canvasAgentPanel" data-i18n-aria="openCanvasAgent" aria-label="Open PenEcho Agent" data-i18n-title="canvasAgent" title="PenEcho Agent">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5.5h10a3 3 0 0 1 3 3v5a3 3 0 0 1-3 3h-5l-4.5 3v-3H7a3 3 0 0 1-3-3v-5a3 3 0 0 1 3-3Z"/><path d="M8 10h8M8 13h5"/></svg>
+          <span data-i18n="canvasAgent">PenEcho Agent</span>
+        </button>
+      </div>
       <span id="canvasHint" class="canvas-hint" role="status" aria-live="polite" hidden></span>
     </footer>
   </main>
@@ -514,6 +686,10 @@
           <div class="settings-quick-heading"><h3 id="settingsConfigurationHeading" data-i18n="settingsConnections">AI connections</h3><button id="settingsOpenApi" type="button" data-i18n="settingsManage">Manage</button></div>
           <div id="settingsConnectionQuickList" class="settings-connection-quick-list"></div>
           <div class="settings-entry-actions">
+            <button id="pluginButton" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="pluginPopover" data-i18n-aria="plugins" aria-label="Plugins">
+              <strong data-i18n="plugins">Plugins</strong><small data-i18n="settingsPluginsEntryHelp">Manage AI capabilities</small>
+            </button>
+            <button id="settingsOpenSearch" type="button"><strong data-i18n="settingsSearchEntry">Internet search</strong><small id="settingsSearchEntryStatus" data-i18n="settingsSearchNotConfigured">DuckDuckGo + built-in search ready · DeepSeek Flash or Tavily optional</small></button>
             <button id="settingsOpenSystem" type="button"><strong data-i18n="settingsSystemEntry">System settings</strong><small data-i18n="settingsSystemEntryHelp">Restart required after saving</small></button>
           </div>
         </section>
@@ -525,26 +701,39 @@
             </div>
             <label class="settings-field settings-provider-field"><span data-i18n="settingsProvider">AI provider</span><select id="settingsProvider" name="provider"><option value="api">API</option><option value="kimi-cli">Kimi CLI</option><option value="codex-cli">Codex CLI</option><option value="claude-cli">Claude CLI</option></select></label>
             <div id="settingsApiFields">
-            <div class="settings-fields two-column">
-              <label><span data-i18n="settingsApiFormat">API format</span><select id="settingsApiFormat" name="apiFormat"><option value="openai">OpenAI compatible</option><option value="anthropic">Anthropic compatible</option><option value="kimi">Kimi</option><option value="minimax">MiniMax</option></select></label>
-              <label><span data-i18n="settingsApiModel">Model</span><input id="settingsApiModel" name="apiModel" list="settingsApiModelPresets" autocomplete="off" spellcheck="false" placeholder="gpt-5.6-sol" required></label>
-            </div>
-            <datalist id="settingsApiModelPresets"></datalist>
+            <label class="settings-field"><span data-i18n="settingsApiFormat">API format</span><select id="settingsApiFormat" name="apiFormat"><option value="openai">OpenAI compatible</option><option value="anthropic">Anthropic compatible</option><option value="kimi">Kimi</option><option value="minimax">MiniMax</option></select></label>
             <div id="settingsApiPresetFields" class="settings-fields two-column settings-preset-fields" hidden>
               <label><span data-i18n="settingsApiRegion">Access region</span><select id="settingsApiRegion" name="apiRegion"><option value="global" data-i18n="settingsApiRegionGlobal">Global</option><option value="china" data-i18n="settingsApiRegionChina">Mainland China</option></select></label>
               <label><span data-i18n="settingsApiService">Service</span><select id="settingsApiService" name="apiService"><option value="api" data-i18n="settingsApiServiceApi">API</option><option value="coding" data-i18n="settingsApiServiceCoding">Coding Plan</option></select></label>
             </div>
             <label class="settings-field"><span data-i18n="settingsApiUrl">Base URL</span><input id="settingsApiUrl" name="apiUrl" type="url" autocomplete="off" spellcheck="false" placeholder="https://api.openai.com/v1" required></label>
             <label class="settings-field"><span data-i18n="settingsApiKey">API key</span><input id="settingsApiKey" name="apiKey" type="password" autocomplete="new-password" placeholder="Paste a new key or leave blank to keep the saved key"><small data-i18n="settingsApiKeyHelp">Stored only in the local PenEcho configuration file.</small></label>
+            <div class="settings-field settings-model-field">
+              <label for="settingsApiModel"><span data-i18n="settingsApiModel">Model</span></label>
+              <div id="settingsApiModelCombobox" class="settings-model-control">
+                <input id="settingsApiModel" name="apiModel" list="settingsApiModelPresets" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-controls="settingsApiModelOptions" aria-expanded="false" autocomplete="off" spellcheck="false" placeholder="gpt-5.6-sol" required>
+                <button id="settingsFetchModels" class="settings-fetch-models" type="button" aria-busy="false"><span data-i18n="settingsFetchModels">Fetch models</span></button>
+                <div id="settingsApiModelOptions" class="settings-combobox-options" role="listbox" data-i18n-aria="settingsModelSuggestions" aria-label="Available models" hidden></div>
+              </div>
+            </div>
+            <datalist id="settingsApiModelPresets"></datalist>
             </div>
             <div id="settingsCliFields" hidden>
-              <div class="settings-fields two-column">
-                <label><span data-i18n="settingsCliModel">Model (optional)</span><input id="settingsCliModel" autocomplete="off" spellcheck="false" placeholder="Use CLI default"></label>
-                <label><span data-i18n="settingsCliPath">Command or path</span><input id="settingsCliPath" autocomplete="off" spellcheck="false" placeholder="codex"></label>
-              </div>
-              <p class="settings-note" data-i18n="settingsCliHelp">Uses the CLI's existing local login. PenEcho does not install or sign in from this dialog.</p>
+              <label class="settings-field"><span data-i18n="settingsCliModel">Model (optional)</span><input id="settingsCliModel" autocomplete="off" spellcheck="false" placeholder="Use CLI default"></label>
+              <input id="settingsCliPath" type="hidden">
+              <section id="settingsCliStatus" class="settings-cli-status" data-state="checking" role="status" aria-live="polite">
+                <span class="settings-cli-status-dot" aria-hidden="true"></span>
+                <div><strong id="settingsCliStatusTitle" data-i18n="settingsCliChecking">Checking CLI…</strong><small id="settingsCliStatusDetail" data-i18n="settingsCliCheckingDetail">Looking for a PenEcho-managed or system installation.</small><div id="settingsCliCommandRow" class="settings-cli-command" hidden><code id="settingsCliCommand"></code><button id="settingsCliCopyCommand" type="button" data-i18n="settingsCliCopyCommand">Copy command</button></div></div>
+              </section>
+              <p class="settings-note" data-i18n="settingsCliHelp">PenEcho detects the CLI automatically. If one-click installation fails, copy the official command and install it in a terminal.</p>
+              <aside id="settingsKimiCliRecommendation" class="settings-provider-notice" role="note" hidden>
+                <strong data-i18n="settingsKimiCodingRecommendationTitle">Recommended: connect with the Kimi Coding API</strong>
+                <p data-i18n="settingsKimiCodingRecommendationBody">Create and copy an API key in the Kimi Code Console, then add an API connection using the OpenAI-compatible format and this Base URL.</p>
+                <div><code>https://api.kimi.com/coding/v1</code><a href="https://www.kimi.com/code/console" target="_blank" rel="noopener noreferrer" data-i18n="settingsKimiCodingConsole">Open Kimi Code Console</a></div>
+                <small data-i18n="settingsKimiCodingRecommendationReason">Kimi CLI may not reliably reuse the Harness context cache, which can increase latency and usage.</small>
+              </aside>
             </div>
-            <label class="settings-field"><span data-i18n="settingsEffort">Reasoning</span><select id="settingsEffort" name="effort" required><option value="none">None</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Maximum</option></select><small data-i18n="settingsEffortToolbarHelp">You can quickly change reasoning for any request from the Canvas toolbar.</small></label>
+            <div class="settings-field"><label for="settingsEffort"><span data-i18n="settingsEffort">Reasoning</span></label><div id="settingsEffortCombobox" class="settings-combobox"><input id="settingsEffort" name="effort" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-controls="settingsEffortOptions" aria-expanded="false" autocomplete="off" spellcheck="false" maxlength="128" required><button id="settingsEffortToggle" class="settings-combobox-toggle" type="button" aria-haspopup="listbox" aria-controls="settingsEffortOptions" aria-expanded="false" data-i18n-aria="settingsShowEffortSuggestions" aria-label="Show reasoning suggestions" data-i18n-title="settingsShowEffortSuggestions" title="Show reasoning suggestions"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5"/></svg></button><div id="settingsEffortOptions" class="settings-combobox-options" role="listbox" data-i18n-aria="settingsEffortSuggestions" aria-label="Reasoning suggestions" hidden><button type="button" role="option" data-effort-value="none" aria-selected="false">none</button><button type="button" role="option" data-effort-value="low" aria-selected="false">low</button><button type="button" role="option" data-effort-value="medium" aria-selected="false">medium</button><button type="button" role="option" data-effort-value="high" aria-selected="false">high</button><button type="button" role="option" data-effort-value="xhigh" aria-selected="false">xhigh</button><button type="button" role="option" data-effort-value="max" aria-selected="false">max</button></div></div><small data-i18n="settingsEffortToolbarHelp">You can quickly change reasoning for any request from the Canvas toolbar.</small></div>
           </section>
           <section class="settings-group settings-system-group" aria-labelledby="settingsSystemHeading">
             <div class="settings-section-heading"><div><h3 id="settingsSystemHeading" data-i18n="settingsSystemSection">System</h3><p data-i18n="settingsSystemDescription">Simple defaults for requests and canvas behavior.</p></div></div>
@@ -559,11 +748,38 @@
             <label class="settings-field"><span data-i18n="settingsTraceLimit">Keep request traces</span><input id="settingsTraceLimit" name="requestTraceLimit" type="number" min="1" max="1000" step="1" required></label>
             <div class="settings-row"><span id="settingsTraceLabel" data-i18n="settingsRequestTrace">Record request details</span><button id="settingsTraceToggle" class="settings-switch" type="button" role="switch" aria-checked="false" aria-labelledby="settingsTraceLabel"><span class="settings-switch-thumb" aria-hidden="true"></span></button></div>
           </section>
+          <section class="settings-group settings-search-group" aria-labelledby="settingsSearchHeading">
+            <div class="settings-section-heading">
+              <div><h3 id="settingsSearchHeading" data-i18n="settingsSearchSection">Internet search</h3><p data-i18n="settingsSearchDescription">On by default. DeepSeek Flash or Tavily can be added, while DuckDuckGo, research, GitHub, and stock search remain available as backups.</p></div>
+              <div class="settings-search-saved-badges">
+                <span id="settingsDeepSeekSearchSaved" class="settings-saved-badge" hidden data-i18n="settingsDeepSeekSearchSaved">Flash key saved</span>
+                <span id="settingsTavilySaved" class="settings-saved-badge" hidden data-i18n="settingsTavilySaved">Tavily saved</span>
+                <span id="settingsDuckDuckGoReady" class="settings-saved-badge" data-i18n="settingsDuckDuckGoReady">DuckDuckGo fallback ready</span>
+              </div>
+            </div>
+            <label class="settings-field"><span data-i18n="settingsDeepSeekSearchProvider">Flash key provider</span><select id="settingsDeepSeekSearchProvider" name="deepSeekSearchProvider"><option value="deepseek-official" data-i18n="settingsDeepSeekSearchProviderOfficial">DeepSeek official</option><option value="opencode-go" data-i18n="settingsDeepSeekSearchProviderOpenCodeGo">OpenCode Go</option></select><small data-i18n="settingsDeepSeekSearchProviderHelp">Choose where this key was issued. PenEcho automatically sends native Flash search to the matching endpoint.</small></label>
+            <aside id="settingsOpenCodeGoSearchSetup" class="settings-provider-notice" hidden>
+              <strong data-i18n="settingsOpenCodeGoSearchSetupTitle">OpenCode Go setup</strong>
+              <p data-i18n="settingsOpenCodeGoSearchSetupBody">Open the Go page in your current OpenCode Workspace, enable China-hosted DeepSeek models, then copy the Go API key and paste it below.</p>
+              <a href="https://opencode.ai/go" target="_blank" rel="noopener noreferrer" data-i18n="settingsOpenCodeGoSearchSetupLink">Open OpenCode Go</a>
+            </aside>
+            <label class="settings-field"><span data-i18n="settingsDeepSeekSearchApiKey">Flash search API key</span><input id="settingsDeepSeekSearchApiKey" name="deepseekSearchApiKey" type="password" autocomplete="new-password" placeholder="sk-…"><small data-i18n="settingsDeepSeekSearchApiKeyHelp">Preferred current-web provider. Each search uses a separate DeepSeek V4 Flash model turn with native web search; the key stays local until search is enabled and called.</small></label>
+            <label class="settings-field"><span data-i18n="settingsTavilyApiKey">Tavily API key</span><input id="settingsTavilyApiKey" name="tavilyApiKey" type="password" autocomplete="new-password" placeholder="tvly-…"><small data-i18n="settingsTavilyApiKeyHelp">Optional fallback web-search provider. Stored locally and sent only from the PenEcho service to Tavily when search is enabled and called.</small></label>
+            <div class="settings-search-test-status" aria-labelledby="settingsSearchTestStatusTitle">
+              <strong id="settingsSearchTestStatusTitle" data-i18n="settingsSearchTestStatusTitle">Current search status</strong>
+              <div id="settingsSearchTestResults" class="settings-search-test-results" role="status" aria-live="polite" aria-busy="false">
+                <div data-search-test-provider="flash"><span id="settingsSearchTestFlashLabel">Flash native search</span><output data-state="idle" data-i18n="settingsSearchTestNotTested">Not tested</output></div>
+                <div data-search-test-provider="tavily"><span>Tavily</span><output data-state="idle" data-i18n="settingsSearchTestNotTested">Not tested</output></div>
+                <div data-search-test-provider="duckduckgo"><span>DuckDuckGo</span><output data-state="idle" data-i18n="settingsSearchTestNotTested">Not tested</output></div>
+              </div>
+            </div>
+          </section>
           <div class="settings-form-footer">
             <button id="settingsEditorCancel" class="settings-editor-cancel" type="button" data-i18n="settingsCancel">Cancel</button>
             <p id="settingsSaveStatus" class="settings-save-status" role="status" aria-live="polite"></p>
             <button id="settingsInstallCli" class="settings-install-cli" type="button" hidden data-i18n="settingsInstallCli">Install CLI</button>
             <button id="settingsTestConnection" class="settings-test-connection" type="button" data-i18n="settingsTestConnection">Test connection</button>
+            <button id="settingsTestSearch" class="settings-test-search" type="button" hidden data-i18n="settingsTestSearch">Test search</button>
             <button id="settingsSave" class="settings-save" type="submit" data-i18n="settingsSaveConnection">Save connection</button>
           </div>
         </form>
@@ -572,6 +788,10 @@
           <div class="settings-row">
             <span id="settingsAutoLabel" data-i18n="autoAI">Auto AI</span>
             <button id="settingsAutoToggle" class="settings-switch on" type="button" role="switch" aria-checked="true" aria-labelledby="settingsAutoLabel"><span class="settings-switch-thumb" aria-hidden="true"></span></button>
+          </div>
+          <div class="settings-row">
+            <span id="settingsCanvasAgentAutoOpenLabel" data-i18n="settingsCanvasAgentAutoOpen">Open PenEcho Agent with each canvas</span>
+            <button id="settingsCanvasAgentAutoOpenToggle" class="settings-switch on" type="button" role="switch" aria-checked="true" aria-labelledby="settingsCanvasAgentAutoOpenLabel"><span class="settings-switch-thumb" aria-hidden="true"></span></button>
           </div>
           <div class="settings-row">
             <span id="settingsWidgetShadowLabel" data-i18n="settingsWidgetShadow">Widget &amp; image shadows</span>
@@ -646,18 +866,18 @@
       <header class="changelog-header">
         <div class="changelog-heading">
           <span class="changelog-badge" data-i18n="changelogBadge">What's new</span>
-          <span class="changelog-version">1.0.0</span>
+          <span class="changelog-version">1.1.0</span>
         </div>
         <button id="changelogClose" class="changelog-close" type="button" data-i18n-aria="changelogClose" aria-label="Close release notes" data-i18n-title="changelogClose" title="Close release notes">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
         </button>
       </header>
       <div class="changelog-scroll">
-        <h2 id="changelogTitle" data-i18n="changelogTitle">Local-first Cloud and Echoes</h2>
+        <h2 id="changelogTitle" data-i18n="changelogTitle">Visual productivity with PenEcho Agent</h2>
         <section class="changelog-release">
           <ul>
-            <li data-i18n="changelogLocalCloud">Open Cloud and favorite Canvases locally; add favorite Widgets to your current Canvas.</li>
-            <li data-i18n="changelogEchoes">Publish to Echoes, Echo shared work, and share Widgets or Canvases as images.</li>
+            <li data-i18n="changelogCanvasAgentResearch">Turn folders, files, web research, and canvas context into structured visual work from the PenEcho Agent below the canvas.</li>
+            <li data-i18n="changelogCanvasAgentWorkspace">Visual Explorer brings research, analysis, planning, and editable on-canvas delivery into one workflow—with less tool switching and rework.</li>
           </ul>
         </section>
       </div>
@@ -674,6 +894,7 @@
   <script src="plugins.js"></script>
   <script src="summon.js"></script>
   <script src="app.js"></script>
+  <script src="canvas-agent-activity.js"></script>
   <script src="cloud-connect.js"></script>
   <script src="viewer.js" defer></script>
 </body>

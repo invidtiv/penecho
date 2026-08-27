@@ -312,34 +312,16 @@ test("widget links are limited to public HTTPS and always open outside the sandb
 });
 
 test("public-data proxy queues requests beyond twenty and resumes them when a slot opens", async () => {
-  const server = fs.readFileSync(path.join(ROOT, "src", "server", "main.js"), "utf8"),
-    queue = vm.runInNewContext(`(() => {
-      const PUBLIC_FETCH_MAX_CONCURRENT = 20, PUBLIC_FETCH_QUEUE_TIMEOUT_MS = 30000, publicFetchQueue = [];
-      let activePublicFetches = 0;
-      ${functionSource(server, "publicFetchFailure")}
-      ${functionSource(server, "publicFetchAbortError")}
-      ${functionSource(server, "waitForPublicFetchSlot")}
-      ${functionSource(server, "releasePublicFetchSlot")}
-      return {
-        wait:waitForPublicFetchSlot,
-        release:releasePublicFetchSlot,
-        get active() { return activePublicFetches; },
-        get queued() { return publicFetchQueue.length; },
-      };
-    })()`, { setTimeout, clearTimeout });
-  await Promise.all(Array.from({ length:20 }, () => queue.wait(new AbortController().signal)));
+  const queue = require("../src/server/public-fetch.js").createPublicFetchService({ maxConcurrent:20, queueTimeoutMs:30000 });
+  await Promise.all(Array.from({ length:20 }, () => queue.waitForPublicFetchSlot(new AbortController().signal)));
   let resumed = false;
-  const queued = queue.wait(new AbortController().signal).then(() => (resumed = true));
+  const queued = queue.waitForPublicFetchSlot(new AbortController().signal).then(() => (resumed = true));
   await Promise.resolve();
-  assert.equal(queue.active, 20);
-  assert.equal(queue.queued, 1);
   assert.equal(resumed, false);
-  queue.release();
+  queue.releasePublicFetchSlot();
   await queued;
-  assert.equal(queue.active, 20);
-  assert.equal(queue.queued, 0);
-  for (let index = 0; index < 20; index++) queue.release();
-  assert.equal(queue.active, 0);
+  assert.equal(resumed, true);
+  for (let index = 0; index < 20; index++) queue.releasePublicFetchSlot();
 });
 
 test("weather demo is a concise capability contract without an HTML template", () => {
@@ -401,8 +383,14 @@ test("every built-in plugin uses a directory bundle", () => {
   assert.match(general.document, /never use a JSON, XML, YAML, source-code, or `<pre>` dump as the primary view/);
   assert.match(general.document, /locally renders its supported `diagram_source` formats from source alone/);
   assert.match(general.document, /Placement is semantic, not a search for unused canvas space/);
+  assert.match(general.document, /## Capability router[\s\S]*Choose exactly one primary Widget path before authoring/);
+  assert.match(general.document, /Use Visual Explainer when[\s\S]*Use ordinary General HTML when custom behavior is primary[\s\S]*Use Professional Diagrams when/);
+  assert.match(general.document, /Transformer explanation is Visual Explainer[\s\S]*interactive attention simulator is General HTML[\s\S]*editable C4 model is Professional Diagrams/);
+  assert.match(general.document, /Merely asking to draw, explain, or show an architecture, model, structure, process, flow, diagram, or chart is not enough[\s\S]*Visual Explainer when available/);
   assert.match(general.document, /overlay only the solution path on an existing maze/);
   assert.match(general.document, /existing figures or objects[\s\S]*?position the transparent widget over their actual locations[\s\S]*?never redraw the figures/);
+  assert.match(general.document, /Match the current PenEcho theme and nearby visual language/);
+  assert.match(general.document, /contained opaque or translucent surface[\s\S]*?materially improves contrast, legibility, semantic grouping, or media presentation[\s\S]*?smallest necessary local surface/);
   assert.match(general.document, /Dynamic SVG fully supports/);
   assert.match(general.document, /multi-part SVG visual[\s\S]*?wrapping CSS layout with tight-viewBox panels[\s\S]*?never make the whole widget one fixed-size viewBox/);
   assert.match(general.document, /explicitly aim the camera at the subject and keep it centered after resize/);
@@ -429,7 +417,10 @@ test("every built-in plugin uses a directory bundle", () => {
   for (const format of ["mermaid", "dot", "bpmn-xml", "vega-lite", "geojson", "smiles", "cytoscape-json"])
     assert.match(flowchart.document, new RegExp(`\\\`${format}\\\``));
   assert.match(flowchart.document, /Do not include HTML, CSS, imports, URLs, or JavaScript in `diagram_source`/);
-  assert.match(flowchart.document, /diagram background transparent by default[\s\S]*opaque diagram background only when it is visually necessary or the user explicitly requests one/);
+  assert.match(flowchart.document, /Use only when the required artifact needs established professional notation[\s\S]*faithful quantitative chart with axes and scales[\s\S]*Do not select it merely because the user says diagram, chart, architecture, model, structure, process, flow, or draw/);
+  assert.match(flowchart.document, /C4\/BPMN[\s\S]*Transformer explanations[\s\S]*simulators, live maps/);
+  assert.match(flowchart.document, /diagram background transparent by default[\s\S]*opaque or translucent backing[\s\S]*materially improves contrast, legibility, semantic grouping, or media presentation/);
+  assert.match(flowchart.document, /palette and density that best match the current PenEcho theme and nearby Canvas content/);
   assert.match(flowchart.document, /use 3–5 meaningful phases[\s\S]*only when most inter-phase flow stays forward[\s\S]*Keep rework, exception and rejection branches beside the decision/);
   assert.match(flowchart.document, /multi-stage business process with repeated cross-phase returns[\s\S]*prefer `bpmn-xml` with explicit diagram geometry/);
   assert.match(flowchart.document, /reflows the diagram automatically as the widget is resized/);
@@ -526,10 +517,11 @@ test("widget host keeps generated HTML in an opaque inner frame and snapshots it
   const host = fs.readFileSync(path.join(ROOT, "public", "widget-host.js"), "utf8"),
     html = fs.readFileSync(path.join(ROOT, "public", "widget-host.html"), "utf8"),
     server = fs.readFileSync(path.join(ROOT, "src", "server", "main.js"), "utf8"),
+    publicFetch = fs.readFileSync(path.join(ROOT, "src", "server", "public-fetch.js"), "utf8"),
     flowchart = fs.readFileSync(path.join(ROOT, "public", "plugins", "flowchart", "plugin.md"), "utf8"),
     renderer = fs.readFileSync(path.join(ROOT, "public", "vendor", "penecho-dom-renderer.js"), "utf8"),
     rendererLicense = fs.readFileSync(path.join(ROOT, "public", "vendor", "html2canvas.LICENSE"), "utf8");
-  const snapshot = functionSource(host, "snapshot"),
+  const snapshot = functionSource(host, "snapshotDocument"),
     widgetDocument = functionSource(host, "widgetDocument");
   const scopeInlineScript = vm.runInNewContext(`(() => {
     ${functionSource(host, "inlineScriptHasWindowBinding")}
@@ -571,7 +563,8 @@ test("widget host keeps generated HTML in an opaque inner frame and snapshots it
   assert.match(scopeInlineScript("function parent() {}"), /^\(\(\) => \{/);
   assert.match(host, /setAttribute\("sandbox", "allow-scripts allow-popups allow-popups-to-escape-sandbox"\)/);
   assert.doesNotMatch(host, /allow-same-origin/);
-  assert.match(host, /script-src 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https: \$\{rendererUrl\}/);
+  assert.match(host, /\.map\(url => url\.replace\(\/\[\?#\]\.\*\$\/, ""\)\)/);
+  assert.match(host, /script-src 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https: \$\{scriptSources\}/);
   assert.match(host, /connect-src https:/);
   assert.match(host, /img-src data: blob: https:/);
   assert.match(host, /querySelectorAll\("script\[src\]"\)[\s\S]*?safeHttpsResource/);
@@ -589,8 +582,12 @@ test("widget host keeps generated HTML in an opaque inner frame and snapshots it
   assert.match(snapshot, /domSnapshotRenderer = globalThis\.html2canvas[\s\S]*?domSnapshotRenderer\(document\.documentElement/);
   assert.doesNotMatch(snapshot, /\bfetch\s*\(|proxyPublicFetch|PUBLIC_FETCH|notifyReady|penecho-widget-updated/);
   assert.match(host, /snapshotPrimarySvg\(requestedWidth, requestedHeight, scale\)/);
-  assert.match(snapshot, /scale = Math\.min\(1, MAX_SNAPSHOT_DIMENSION \/ requestedWidth, MAX_SNAPSHOT_DIMENSION \/ requestedHeight, Math\.sqrt\(MAX_SNAPSHOT_PIXELS \/ \(requestedWidth \* requestedHeight\)\)\)/);
-  assert.match(host, /scale = Math\.min\(1, MAX_SNAPSHOT_DIMENSION \/ request\.requestedWidth, MAX_SNAPSHOT_DIMENSION \/ request\.requestedHeight, Math\.sqrt\(MAX_SNAPSHOT_PIXELS \/ \(request\.requestedWidth \* request\.requestedHeight\)\)\)/);
+  assert.match(host, /HIGH_RESOLUTION_SNAPSHOT_SCALE = 1\.5,[\s\S]*?MAX_HIGH_RESOLUTION_SNAPSHOT_DIMENSION = 3600,[\s\S]*?MAX_HIGH_RESOLUTION_SNAPSHOT_PIXELS = 10800000/);
+  assert.match(snapshot, /highResolution = message\.highResolution === true[\s\S]*?targetScale = highResolution \? HIGH_RESOLUTION_SNAPSHOT_SCALE : 1[\s\S]*?scale = Math\.min\(targetScale, maximumDimension \/ requestedWidth, maximumDimension \/ requestedHeight, Math\.sqrt\(maximumPixels \/ \(requestedWidth \* requestedHeight\)\)\)/);
+  assert.match(host, /highResolution:request\.highResolution/);
+  assert.match(host, /highResolution:message\.highResolution === true/);
+  assert.match(host, /targetScale = request\.highResolution \? HIGH_RESOLUTION_SNAPSHOT_SCALE : 1[\s\S]*?scale = Math\.min\(targetScale, maximumDimension \/ request\.requestedWidth, maximumDimension \/ request\.requestedHeight, Math\.sqrt\(maximumPixels \/ \(request\.requestedWidth \* request\.requestedHeight\)\)\)/);
+  assert.match(host, /MAX_HIGH_RESOLUTION_SNAPSHOT_DATA_URL_LENGTH = 64 \* 1024 \* 1024[\s\S]*?maximumDataUrlLength = request\.highResolution \? MAX_HIGH_RESOLUTION_SNAPSHOT_DATA_URL_LENGTH : MAX_SNAPSHOT_DATA_URL_LENGTH/);
   assert.doesNotMatch(host, /requestedScale|dataUrlLimit|scale:request\.requested/);
   assert.match(host, /new XMLSerializer\(\)\.serializeToString\(clone\)/);
   assert.match(host, /context\.drawImage\(image, 0, 0, canvas\.width, canvas\.height\)/);
@@ -640,15 +637,15 @@ test("widget host keeps generated HTML in an opaque inner frame and snapshots it
   assert.match(host, /response\.arrayBuffer\(\)/);
   assert.match(host, /\}, \[body\]\)/);
   assert.match(server, /url\.pathname === "\/api\/widget-fetch"/);
-  assert.match(server, /PUBLIC_FETCH_MAX_URL_LENGTH = 16 \* 1024/);
-  assert.match(server, /PUBLIC_FETCH_MAX_CONCURRENT = 20/);
-  assert.match(server, /PUBLIC_FETCH_QUEUE_TIMEOUT_MS = 30000/);
+  assert.match(publicFetch, /PUBLIC_FETCH_MAX_URL_LENGTH = 16 \* 1024/);
+  assert.match(publicFetch, /PUBLIC_FETCH_MAX_CONCURRENT = 20/);
+  assert.match(publicFetch, /PUBLIC_FETCH_QUEUE_TIMEOUT_MS = 30000/);
   assert.match(server, /waitForPublicFetchSlot\(controller\.signal\)/);
   assert.match(server, /if \(slotAcquired\) releasePublicFetchSlot\(\)/);
-  assert.doesNotMatch(server, /url\.port !== "443"/);
-  assert.doesNotMatch(server, /did not return text, JSON, XML, or RSS/);
-  assert.match(server, /dns\.lookup\(hostname, \{ all:true, verbatim:true \}\)/);
-  assert.match(server, /lookup\(_hostname, options, callback\)/);
+  assert.doesNotMatch(publicFetch, /url\.port !== "443"/);
+  assert.doesNotMatch(publicFetch, /did not return text, JSON, XML, or RSS/);
+  assert.match(publicFetch, /dnsLookup\(hostname, \{ all:true, verbatim:true \}\)/);
+  assert.match(publicFetch, /lookup\(_hostname, requestOptions, callback\)/);
   assert.match(host, /MAX_HTML_LENGTH = 200000/);
   assert.match(server, /MAX_WIDGET_HTML_LENGTH = 200000/);
   assert.doesNotMatch(host, /<foreignObject|penecho-widget-snapshot-markup/);
@@ -711,7 +708,7 @@ test("widget host loads generated HTML directly into the opaque sandbox", () => 
     innerLoadRegistration = host.slice(host.indexOf('inner.addEventListener("load"'), host.indexOf("document.body.append(inner)"));
   assert.match(host, /inner\.addEventListener\("load", forwardWidgetState\)/);
   assert.doesNotMatch(innerLoadRegistration, /srcdoc|widgetDocument/);
-  assert.match(host, /const documentSource = widgetDocument\(message\.html, message\.pluginStyles \|\| "", runtimeVersion\);[\s\S]*?inner\.removeAttribute\("src"\);[\s\S]*?inner\.srcdoc = documentSource/);
+  assert.match(host, /const documentSource = widgetDocument\(message\.html, message\.pluginStyles \|\| "", runtimeVersion, message\.sourceFormat, message\.frameworkVersion\);[\s\S]*?inner\.removeAttribute\("src"\);[\s\S]*?inner\.srcdoc = documentSource/);
   assert.doesNotMatch(host, /innerDocumentUrl|releaseInnerDocumentUrl|URL\.revokeObjectURL\(innerDocumentUrl\)/);
   assert.match(host, /inner\.setAttribute\("sandbox", "allow-scripts allow-popups allow-popups-to-escape-sandbox"\)/);
   assert.doesNotMatch(host, /allow-same-origin/);

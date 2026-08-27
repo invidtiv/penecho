@@ -92,6 +92,13 @@
     supersedeActiveAI("user-stop");
     return true;
   }
+  function stopActiveAutomaticAI(reason = "automatic-ai-cancelled") {
+    const preparation = aiPreparation,
+      active = state.activeAI;
+    if (preparation?.action !== "auto" && active?.action !== "auto") return false;
+    supersedeActiveAI(reason);
+    return true;
+  }
   function hasUnsettledToolbox() {
     return Boolean(state.pending || state.pendingWidget || state.pendingGesture || state.widgetEdit || state.widgetGesture || state.imageEdit || state.imageGesture || state.imageImporting || state.selection || state.selectionGesture || state.textEditors.size);
   }
@@ -151,6 +158,7 @@
     return{ok:terminal.type==="result"&&status>=200&&status<300,status,data:terminal.data||{}};
   }
   function launchAutomaticAI(reason) {
+    if (canvasAgentSuppressesAutomaticAI()) return;
     if (state.mode === "hand" || !state.auto || !state.dirty || !state.autoEligible || state.drawing || state.widgetRefineConfirmation) return;
     if (aiPreparation || state.activeAI) return;
     if (currentWidgetRefineCandidate()) {
@@ -168,6 +176,7 @@
   function schedule(delay = state.autoDelayMs) {
     clearTimeout(state.timer);
     state.timer = 0;
+    if (canvasAgentSuppressesAutomaticAI()) return;
     if (state.mode === "hand" || !state.auto || !state.dirty || !state.autoEligible) return;
     if (activeWidgetRefinement() || state.widgetRefineConfirmation) return;
     if (currentWidgetRefineCandidate()) {
@@ -239,6 +248,7 @@
         controller,
         generation:preparationGeneration,
         superseded:false,
+        action,
         widgetEdit:widgetEditTarget ? { target:widgetEditTarget, targetId:widgetEditTarget.id, pluginId:widgetEditTarget.pluginId, revision } : null,
       };
     let attentionBox = dirtySnapshot || (captureCurrentViewport ? null : latestBox);
@@ -904,8 +914,13 @@
             diagramKind = typeof c.diagramKind === "string" ? c.diagramKind.trim() : "",
             sourceFormat = typeof c.sourceFormat === "string" ? c.sourceFormat.trim() : "",
             frameworkVersion = typeof c.frameworkVersion === "string" ? c.frameworkVersion.trim() : "",
-            geometry = fitWidgetGeometry(c, visibleRect);
-          if (widgetSlots <= 0 || !widgetPluginIds.has(c.pluginId) || widgetEditTarget && c.pluginId !== widgetEditTarget.pluginId || !geometry || typeof c.title !== "string" || !c.title.trim() || c.title.length > 120 || !validWidgetRefreshSeconds(c.refreshSeconds) || typeof c.html !== "string" || !c.html.trim() || c.html.length > MAX_WIDGET_HTML_LENGTH || diagramKind.length > 80 || sourceFormat.length > 80 || frameworkVersion.length > 120 || allowCopy && c.copyText !== undefined && (typeof c.copyText !== "string" || !c.copyText.trim() || c.copyText.length > MAX_WIDGET_COPY_TEXT_LENGTH) || allowCopy && c.copyLabel !== undefined && (typeof c.copyLabel !== "string" || !c.copyLabel.trim() || c.copyLabel.length > 80) || c.pluginId === "flowchart" && (typeof c.copyText !== "string" || !c.copyText.trim() || !sourceFormat)) return null;
+            geometry = fitWidgetGeometry(c, visibleRect),copyTextLimit=sourceFormat===VISUAL_EXPLAINER_SOURCE_FORMAT?MAX_VISUAL_EXPLAINER_SOURCE_LENGTH:MAX_WIDGET_COPY_TEXT_LENGTH;
+          if (widgetSlots <= 0 || !widgetPluginIds.has(c.pluginId) || widgetEditTarget && c.pluginId !== widgetEditTarget.pluginId || !geometry || typeof c.title !== "string" || !c.title.trim() || c.title.length > 120 || !validWidgetRefreshSeconds(c.refreshSeconds) || typeof c.html !== "string" || !c.html.trim() || c.html.length > MAX_WIDGET_HTML_LENGTH || diagramKind.length > 80 || sourceFormat.length > 80 || frameworkVersion.length > 120 || allowCopy && c.copyText !== undefined && (typeof c.copyText !== "string" || !c.copyText.trim() || c.copyText.length > copyTextLimit) || allowCopy && c.copyLabel !== undefined && (typeof c.copyLabel !== "string" || !c.copyLabel.trim() || c.copyLabel.length > 80) || c.pluginId === "flowchart" && (typeof c.copyText !== "string" || !c.copyText.trim() || !sourceFormat)) return null;
+          if(widgetEditTarget?.sourceFormat===VISUAL_EXPLAINER_SOURCE_FORMAT){
+            if(sourceFormat!==VISUAL_EXPLAINER_SOURCE_FORMAT||typeof c.copyText!=="string")return null;
+            try{const generated=visualExplainerWidgetItem(JSON.parse(c.copyText),{title:c.title});c={...c,html:generated.html,copyText:generated.copyText,copyLabel:generated.copyLabel,frameworkVersion:generated.frameworkVersion};}
+            catch{return null;}
+          }
           c = {
             tool:"html_widget",
             pluginId:c.pluginId,
@@ -1455,8 +1470,8 @@
     context.fillRect(box.x, box.y, box.w, box.h);
     context.restore();
   }
-  function drawPending(p, context = ctx) {
-    if (p.items) return drawPendingBatch(p, context);
+  function drawPending(p, context = ctx, options = null) {
+    if (p.items) return drawPendingBatch(p, context, options);
     const ctx = context,
       b = draftBounds(p),
       progress = p.revealProgress ?? 1,
@@ -1488,6 +1503,7 @@
     if (p.animationScene) drawPendingAnimation(ctx, p.animationScene, p.animationPlayback ||= createAnimationPlayback(), b);
     else ctx.drawImage(p.image, b.x, b.y, imageWidth, imageHeight);
     ctx.restore();
+    if (options?.chrome === false) return;
     if (progress < 1) {
       const tipX = b.x + currentWidth * p.scaleX,
         tipY = b.y + Math.min(current, rows.length - 1) * rowHeight * p.scaleY + rowHeight * p.scaleY * 0.72,
@@ -1531,7 +1547,7 @@
     ctx.restore();
     drawCopyFeedback(ctx, b, s, p);
   }
-  function drawPendingBatch(p, context = ctx) {
+  function drawPendingBatch(p, context = ctx, options = null) {
     const ctx = context,
       batch = batchBounds(p),
       unit = 1 / state.scale,
@@ -1556,6 +1572,7 @@
       } else ctx.drawImage(item.image, box.x, box.y, box.w, box.h);
       ctx.restore();
     }
+    if (options?.chrome === false) return;
     if (p.items.length > 1 && batchChromeVisible) {
       ctx.save();
       ctx.strokeStyle = "#2679b866";

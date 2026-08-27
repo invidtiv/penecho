@@ -1,4 +1,6 @@
 // Pointer and control bindings, portable snapshots, and application startup.
+  const ERASER_TOOL_MENU_MS = 5000;
+  let eraserToolMenuTimer = 0;
   function updateCanvasPointerPreview(event) {
     const drawing = state.drawing,
       next = state.mode === "eraser"
@@ -13,6 +15,74 @@
     state.pointerPreview = preview;
     requestInteractionLayerRender();
   }
+  function setCanvasViewMode(enabled) {
+    enabled = Boolean(enabled);
+    if (state.viewMode === enabled) return;
+    state.viewMode = enabled;
+    state.pointers.clear();
+    state.touches.clear();
+    state.touchGesture = null;
+    state.panGesture = null;
+    state.textTap = null;
+    state.pointerPreview = null;
+    cancelAreaEraseGesture();
+    hideEraserToolMenu();
+    document.body.classList.toggle("canvas-view-mode", enabled);
+    view.classList.toggle("view-mode", enabled);
+    canvasViewButton.setAttribute("aria-pressed", String(enabled));
+    canvasViewActions.hidden = !enabled;
+    const inactiveSurfaces = view.querySelectorAll([
+      ".canvas-navigation-lock",
+      ".widget-layer",
+      ".object-chrome-layer",
+      ".animation-controls",
+      ".image-edit-bar",
+      ".selection-overlay-layer",
+      ".text-editor-layer",
+      ".ai-embodiment",
+      ".canvas-agent-panel",
+    ].join(","));
+    if (enabled) {
+      for (const element of inactiveSurfaces) {
+        if (element.inert) continue;
+        element.inert = true;
+        element.dataset.canvasViewInert = "true";
+      }
+    } else {
+      for (const element of view.querySelectorAll('[data-canvas-view-inert="true"]')) {
+        element.inert = false;
+        delete element.dataset.canvasViewInert;
+      }
+    }
+    if (enabled) {
+      state.viewModeNavigationLocked = state.navigationLocked;
+      if (state.navigationLocked) setCanvasNavigationLocked(false);
+      if (!document.querySelector("#canvasAgentPanel")?.hidden) closeCanvasAgent();
+      closeRadialMenu();
+      document.activeElement?.blur?.();
+      setCanvasCursor("grab");
+      requestAnimationFrame(() => canvasViewCloseButton.focus({ preventScroll:true }));
+    } else {
+      if (state.viewModeNavigationLocked) setCanvasNavigationLocked(true);
+      state.viewModeNavigationLocked = false;
+      resetCanvasCursor();
+      requestAnimationFrame(() => canvasViewButton.focus({ preventScroll:true }));
+    }
+    requestInteractionLayerRender();
+    requestAnimationFrame(fit);
+  }
+  window.addEventListener("keydown", (event) => {
+    if (!state.viewMode || document.querySelector(".penecho-cloud-overlay")) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setCanvasViewMode(false);
+      return;
+    }
+    if (event.key === "Tab" || canvasViewActions.contains(event.target) && ["Enter", " "].includes(event.key)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
   function beginCanvasPointerAction(e, point) {
     if (state.selectedAnimationId) acceptAnimationEdit();
     if (e.pointerType === "mouse" && e.button !== 0) return;
@@ -39,6 +109,14 @@
         return;
       }
       createTextEditor(point);
+      return;
+    }
+    if (state.mode === "area-eraser") {
+      if (!valid(point)) {
+        setStatusKey("outsideCanvas");
+        return;
+      }
+      beginAreaEraseGesture(e, point);
       return;
     }
     if (state.mode === "select" && e.pointerType !== "touch") {
@@ -97,6 +175,23 @@
   }
   screen.addEventListener("pointerdown", (e) => {
     e.preventDefault();
+    if (state.viewMode) {
+      if (e.pointerType === "mouse" && ![0, 1].includes(e.button)) return;
+      try { screen.setPointerCapture(e.pointerId); } catch {}
+      calibrateScreenClientRatio(e, false);
+      state.pointers.set(e.pointerId, { x:e.clientX, y:e.clientY });
+      if (e.pointerType === "touch") {
+        state.touches.set(e.pointerId, { x:e.clientX, y:e.clientY });
+        if (state.touches.size >= 2) {
+          beginTouchGesture();
+          return;
+        }
+      }
+      state.panGesture = { id:e.pointerId, last:{ x:e.clientX, y:e.clientY } };
+      setCanvasCursor("grabbing");
+      setNavigating(true);
+      return;
+    }
     finishStaleWidgetHostGesture(e);
     if (Date.now() < state.textInputBlockedUntil) return;
     try {
@@ -118,6 +213,7 @@
       if (state.mode === "hand" && state.handGestureIncludesWidget) return;
       if (state.touches.size >= 2) {
         state.textTap = null;
+        cancelAreaEraseGesture();
         if (state.pendingGesture) state.pendingGesture = null;
         if (state.widgetGesture) finishWidgetGesture({ pointerId:state.widgetGesture.id });
         if (state.selectedWidgetId) acceptWidgetEdit();
@@ -180,6 +276,23 @@
   });
   screen.addEventListener("pointermove", (e) => {
     e.preventDefault();
+    if (state.viewMode) {
+      const old = state.pointers.get(e.pointerId);
+      calibrateScreenClientRatio(e, true);
+      state.pointers.set(e.pointerId, { x:e.clientX, y:e.clientY });
+      if (e.pointerType === "touch") state.touches.set(e.pointerId, { x:e.clientX, y:e.clientY });
+      if (state.touches.size >= 2) {
+        if (!state.touchGesture) beginTouchGesture();
+        updateTouchGesture();
+        return;
+      }
+      if (state.panGesture?.id === e.pointerId && old) {
+        moveCanvas(e.clientX - old.x, e.clientY - old.y);
+        state.panGesture.last = { x:e.clientX, y:e.clientY };
+        setNavigating(true);
+      }
+      return;
+    }
     updateCanvasWidgetGestureResetTap(e);
     if (finishReleasedWidgetGesture(e)) return;
     const old = state.pointers.get(e.pointerId);
@@ -204,6 +317,12 @@
     }
     if (state.animationGesture?.id === e.pointerId) {
       updateAnimationGesture(e);
+      return;
+    }
+    if (state.areaEraseGesture?.id === e.pointerId) {
+      updateAreaEraseGesture(e);
+      const point = clientPoint(e);
+      coords.textContent = `x ${Math.round(point.x)} · y ${Math.round(point.y)} · ${Math.round(state.scale * 100)}%`;
       return;
     }
     if (state.selectionGesture?.id === e.pointerId) {
@@ -265,6 +384,20 @@
     coords.textContent = `x ${Math.round(p.x)} · y ${Math.round(p.y)} · ${Math.round(state.scale * 100)}%`;
   });
   function end(e) {
+    if (state.viewMode) {
+      state.pointers.delete(e.pointerId);
+      if (e.pointerType === "touch") state.touches.delete(e.pointerId);
+      state.touchGesture = null;
+      if (e.pointerType === "touch" && state.touches.size === 1) {
+        const [id, point] = state.touches.entries().next().value;
+        state.panGesture = { id, last:point };
+      } else if (state.panGesture?.id === e.pointerId || !state.touches.size) state.panGesture = null;
+      if (!state.panGesture) {
+        setCanvasCursor("grab");
+        setNavigating(false);
+      }
+      return;
+    }
     state.pointers.delete(e.pointerId);
     finishHandObjectFocus(e);
     if (e.pointerType === "touch") {
@@ -304,6 +437,15 @@
     }
     if (state.animationGesture?.id === e.pointerId) {
       finishAnimationGesture(e);
+      return;
+    }
+    if (state.areaEraseGesture?.id === e.pointerId) {
+      finishAreaEraseGesture(e);
+      if (e.pointerType === "touch") {
+        state.touchGesture = null;
+        state.panGesture = null;
+        if (!state.touches.size) setNavigating(false);
+      }
       return;
     }
     if (state.selectionGesture?.id === e.pointerId) {
@@ -394,11 +536,54 @@
       preserveWidgetRefinement:true,
     });
   }
+  function updateEraserToolUI() {
+    if (!eraserToolButton) return;
+    const area = state.eraserMode === "area-eraser",
+      key = area ? "areaEraser" : "eraser";
+    eraserToolButton.dataset.i18nAria = key;
+    eraserToolButton.dataset.i18nTitle = key;
+    eraserToolButton.dataset.activeEraser = state.eraserMode;
+    eraserToolButton.setAttribute("aria-label", t(key));
+    eraserToolButton.setAttribute("title", t(key));
+    eraserFreehandButton?.setAttribute("aria-checked", String(!area));
+    eraserAreaButton?.setAttribute("aria-checked", String(area));
+  }
+  function showEraserToolMenu(focus = false) {
+    if (!eraserToolMenu || !eraserToolButton) return;
+    clearTimeout(eraserToolMenuTimer);
+    eraserToolMenu.hidden = false;
+    eraserToolButton.setAttribute("aria-expanded", "true");
+    updateEraserToolUI();
+    if (focus) (state.eraserMode === "area-eraser" ? eraserAreaButton : eraserFreehandButton)?.focus({ preventScroll:true });
+    eraserToolMenuTimer = setTimeout(() => hideEraserToolMenu(), ERASER_TOOL_MENU_MS);
+  }
+  function hideEraserToolMenu(options) {
+    options ||= {};
+    clearTimeout(eraserToolMenuTimer);
+    eraserToolMenuTimer = 0;
+    if (!eraserToolMenu || eraserToolMenu.hidden) return;
+    const restoreFocus = options.restoreFocus || eraserToolMenu.contains(document.activeElement);
+    eraserToolMenu.hidden = true;
+    eraserToolButton?.setAttribute("aria-expanded", "false");
+    if (restoreFocus) eraserToolButton?.focus({ preventScroll:true });
+  }
+  function selectEraserMode(mode, options) {
+    options ||= {};
+    if (!["eraser", "area-eraser"].includes(mode)) return;
+    state.eraserMode = mode;
+    updateEraserToolUI();
+    setCanvasMode(mode, { showHint:true });
+    if (options.keepMenuOpen) showEraserToolMenu();
+  }
   function setCanvasMode(mode, options) {
     options ||= {};
-    const button = document.querySelector(`[data-mode="${mode}"]`);
+    const eraserMode = ["eraser", "area-eraser"].includes(mode),
+      button = eraserMode ? eraserToolButton : document.querySelector(`[data-mode="${mode}"]`);
     if (!button) return;
-    const finalizingPendingWidgetForEraser = mode === "eraser" && ["hand", "pen"].includes(state.mode)
+    if (eraserMode) state.eraserMode = mode;
+    if (state.areaEraseGesture) cancelAreaEraseGesture();
+    hideEraserToolMenu();
+    const finalizingPendingWidgetForEraser = eraserMode && ["hand", "pen"].includes(state.mode)
       && !options.skipDraftFinalize && Boolean(state.pendingWidget);
     if (finalizingPendingWidgetForEraser) {
       state.aiDraftReturnMode = null;
@@ -462,6 +647,7 @@
       item.classList.toggle("active", item === button);
       item.setAttribute("aria-pressed", String(item === button));
     });
+    updateEraserToolUI();
     resetCanvasCursor();
     requestInteractionLayerRender();
     if (mode === "hand") setNavigating(true);
@@ -474,6 +660,7 @@
         select:["canvasHintLasso", "canvasHintLassoAlt"],
         text:["canvasHintText", "canvasHintTextAlt"],
         eraser:["canvasHintEraser", "canvasHintEraserAlt"],
+        "area-eraser":["canvasHintAreaEraser", "canvasHintAreaEraserAlt"],
       }[mode];
       if (hintKey) showCanvasHint(hintKey);
     }
@@ -482,8 +669,41 @@
     });
   }
   document.querySelectorAll("[data-mode]").forEach((button) => {
+    if (button === eraserToolButton) return;
     button.onclick = () => setCanvasMode(button.dataset.mode, { showHint:true });
   });
+  eraserToolButton?.addEventListener("contextmenu", (event) => event.preventDefault());
+  eraserToolButton?.addEventListener("click", () => selectEraserMode(state.eraserMode, { keepMenuOpen:true }));
+  eraserToolButton?.addEventListener("keydown", (event) => {
+    if (!["ArrowDown", "ArrowUp"].includes(event.key)) return;
+    event.preventDefault();
+    showEraserToolMenu(true);
+  });
+  for (const button of [eraserFreehandButton, eraserAreaButton].filter(Boolean)) {
+    button.addEventListener("pointerdown", (event) => event.stopPropagation());
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      selectEraserMode(button.dataset.eraserMode, { keepMenuOpen:true });
+    });
+    button.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        hideEraserToolMenu({ restoreFocus:true });
+        return;
+      }
+      if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+      event.preventDefault();
+      (button === eraserFreehandButton ? eraserAreaButton : eraserFreehandButton)?.focus({ preventScroll:true });
+    });
+  }
+  document.addEventListener("pointerdown", (event) => {
+    if (eraserToolMenu && !eraserToolMenu.hidden && !eraserToolControl?.contains(event.target)) hideEraserToolMenu();
+  });
+  updateEraserToolUI();
+  canvasViewButton.onclick = () => setCanvasViewMode(true);
+  canvasViewCloseButton.onclick = () => setCanvasViewMode(false);
+  canvasViewShareButton.onclick = () => document.querySelector("#shareCanvasBtn")?.click();
+  canvasViewDownloadButton.onclick = exportCanvasPng;
   [selectionTypesetButton, selectionDeleteButton, selectionCancelButton].filter(Boolean).forEach((button) => {
     button.addEventListener("pointerdown", (event) => event.stopPropagation());
     button.addEventListener("click", (event) => event.stopPropagation());
@@ -744,7 +964,10 @@
     else hideEffortControl();
   };
   pluginButton.onclick = () => {
-    if (pluginPopover.hidden) showPluginControl();
+    if (pluginPopover.hidden) {
+      closeSettings(false);
+      showPluginControl();
+    }
     else hidePluginControl();
   };
   pluginClose.onclick = hidePluginControl;
@@ -1101,36 +1324,75 @@
   settingsBackdrop.addEventListener("pointerdown", () => closeSettings());
   settingsPanel.addEventListener("pointerdown", (event) => event.stopPropagation());
   settingsOpenApi?.addEventListener("click", () => openConfiguration("api"));
+  settingsOpenSearch?.addEventListener("click", () => openConfiguration("search"));
   settingsOpenSystem?.addEventListener("click", () => openConfiguration("system"));
   configurationClose?.addEventListener("click", () => closeConfiguration());
   configurationBackdrop?.addEventListener("pointerdown", () => closeConfiguration());
   configurationPanel?.addEventListener("pointerdown", event => event.stopPropagation());
   canvasSettingsForm?.addEventListener("submit", saveCanvasSettings);
   settingsTestConnection?.addEventListener("click", () => void testCanvasConnection());
+  settingsTestSearch?.addEventListener("click", () => void testCanvasSearch());
+  settingsFetchModels?.addEventListener("click", () => void fetchConnectionModels());
   settingsInstallCli?.addEventListener("click", () => void installCanvasCli());
+  settingsCliCopyCommand?.addEventListener("click", () => void copyCanvasCliCommand());
   settingsAddConnection?.addEventListener("click", () => fillConnectionEditor());
   settingsEditorCancel?.addEventListener("click", hideConnectionEditor);
   settingsConnectionList?.addEventListener("click", handleConnectionAction);
   settingsConnectionQuickList?.addEventListener("click", handleConnectionAction);
+  settingsEffortToggle?.addEventListener("click", () => settingsEffortOptions.hidden ? showSettingsEffortOptions() : hideSettingsEffortOptions());
+  settingsEffort?.addEventListener("pointerdown", showSettingsEffortOptions);
+  settingsEffort?.addEventListener("input", () => {
+    updateSettingsEffortOptions();
+    showSettingsEffortOptions();
+  });
+  settingsEffort?.addEventListener("keydown", handleSettingsEffortKeydown);
+  settingsEffortOptions?.addEventListener("click", (event) => {
+    const option = event.target.closest("[data-effort-value]");
+    if (option) chooseSettingsEffort(option.dataset.effortValue);
+  });
+  settingsEffortOptions?.addEventListener("keydown", handleSettingsEffortOptionKeydown);
+  document.addEventListener("pointerdown", (event) => {
+    if (!settingsEffortCombobox?.contains(event.target)) hideSettingsEffortOptions();
+    if (!document.querySelector("#settingsApiModelCombobox")?.contains(event.target)) hideApiModelOptions();
+  });
   if (window.penechoDesktop) document.querySelector(".settings-links")?.remove();
   settingsProvider?.addEventListener("change", () => {
     updateSettingsProviderFields();
     selectDefaultConnectionEffort();
   });
+  settingsDeepSeekSearchProvider?.addEventListener("change", () => {
+    updateDeepSeekSearchProviderNotice();
+    resetSearchTestStatuses();
+  });
+  settingsDeepSeekSearchApiKey?.addEventListener("input", resetSearchTestStatuses);
+  settingsTavilyApiKey?.addEventListener("input", resetSearchTestStatuses);
   settingsApiFormat?.addEventListener("change", () => {
     updateApiPresetFields(true, true);
     selectDefaultConnectionEffort();
   });
-  settingsApiRegion?.addEventListener("change", () => updateApiPresetFields(true, false));
+  settingsApiRegion?.addEventListener("change", () => {
+    updateApiPresetFields(true, false);
+    clearFetchedApiModels();
+  });
   settingsApiService?.addEventListener("change", () => {
     updateApiPresetFields(true, true);
     selectDefaultConnectionEffort();
   });
+  settingsApiUrl?.addEventListener("input", clearFetchedApiModels);
+  settingsApiKey?.addEventListener("input", clearFetchedApiModels);
+  settingsApiModel?.addEventListener("input", updateApiModelSelection);
+  settingsApiModel?.addEventListener("keydown", handleApiModelKeydown);
+  settingsApiModelOptions?.addEventListener("click", (event) => {
+    const option = event.target.closest("[data-api-model-value]");
+    if (option) chooseApiModel(option.dataset.apiModelValue);
+  });
+  settingsApiModelOptions?.addEventListener("keydown", handleApiModelOptionKeydown);
   settingsTraceToggle?.addEventListener("click", () => {
     settings.requestTrace = !settings.requestTrace;
     updateTraceToggle();
   });
   settingsAutoToggle.addEventListener("click", () => setAutoEnabled(!state.auto));
+  settingsCanvasAgentAutoOpenToggle.addEventListener("click", () => setCanvasAgentAutoOpen(!state.canvasAgentAutoOpen));
   settingsWidgetShadowToggle.addEventListener("click", () => setWidgetShadowEnabled(!state.widgetShadowEnabled));
   summonToggle.addEventListener("click", () => setSummonEnabled(!state.summonEnabled));
   settingsTourButton.addEventListener("click", () => {
@@ -1159,6 +1421,15 @@
   window.visualViewport?.addEventListener("scroll", scheduleFeatureTourPosition);
   window.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && (document.querySelector("#newCanvasDialog").open || document.querySelector("#textHelpDialog").open)) return;
+    if (e.key === "Escape" && eraserToolMenu && !eraserToolMenu.hidden) {
+      hideEraserToolMenu({ restoreFocus:true });
+      return;
+    }
+    if (e.key === "Escape" && state.areaEraseGesture) {
+      cancelAreaEraseGesture();
+      setStatusKey("ready");
+      return;
+    }
     if (e.key === "Escape" && state.selection) {
       cancelSelection();
       return;

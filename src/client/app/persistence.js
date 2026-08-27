@@ -532,11 +532,13 @@
   async function renderExportCanvas() {
     const region = exportRegion();
     if (!region) return null;
-    await prepareVisibleWidgetSnapshots(null, false);
-    const scale = Math.min(1, EXPORT_MAX_DIMENSION / region.w, EXPORT_MAX_DIMENSION / region.h, Math.sqrt(EXPORT_MAX_PIXELS / (region.w * region.h))),
+    await prepareVisibleWidgetSnapshots(null, false, null, true);
+    const scale = Math.min(CANVAS_DOWNLOAD_RESOLUTION_SCALE, EXPORT_MAX_DIMENSION / region.w, EXPORT_MAX_DIMENSION / region.h, Math.sqrt(EXPORT_MAX_PIXELS / (region.w * region.h))),
       canvas = offscreen(Math.max(1, Math.ceil(region.w * scale)), Math.max(1, Math.ceil(region.h * scale))),
       context = canvas.getContext("2d");
     const captureTime = performance.now();
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
     context.fillStyle = state.paint.paper;
     context.fillRect(0, 0, canvas.width, canvas.height);
     context.save();
@@ -583,9 +585,9 @@
     return `penecho-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.png`;
   }
   async function exportCanvasPng() {
-    const button = document.querySelector("#exportPngBtn");
-    if (button.disabled) return;
-    button.disabled = true;
+    const buttons = [document.querySelector("#exportPngBtn"), canvasViewDownloadButton].filter(Boolean);
+    if (buttons.some(button => button.disabled)) return;
+    for (const button of buttons) button.disabled = true;
     let canvas = null;
     try {
       canvas = await renderExportCanvas();
@@ -607,7 +609,7 @@
       setStatus(`${t("exportError")}${error.message}`);
     } finally {
       if (canvas) canvas.width = canvas.height = 1;
-      button.disabled = false;
+      for (const button of buttons) button.disabled = false;
     }
   }
   function imageFromBlob(blob) {
@@ -1094,6 +1096,7 @@
     state.currentSnapshotManifestExtensions = snapshotExtensionObject(item.manifestExtensions);
     state.currentSnapshotPreservedAssets = snapshotPreservedAssets(item.preservedAssets);
     state.snapshotSavedRevision = savedUserRevision;
+    canvasAgentCanvasDidPersist(location, storedId);
     await refreshSnapshots();
     setStatusKey(overwriteId ? "snapshotOverwritten" : "snapshotSaved");
     return storedId;
@@ -1283,6 +1286,7 @@
       state.currentSnapshotManifestExtensions = snapshotExtensionObject(item.manifestExtensions);
       state.currentSnapshotPreservedAssets = snapshotPreservedAssets(item.preservedAssets);
       state.snapshotSavedRevision = state.userRevision;
+      canvasAgentCanvasDidChange({ id:item.id, location },{clearProject:true});
       setHistoryActivity(t("snapshotLoading").replace("{name}", displayName), t("snapshotLoadApplying"), 100);
       render();
       closeHistoryPanel();
@@ -1413,6 +1417,7 @@
     state.currentSnapshotBundleExtensions = {};
     state.currentSnapshotManifestExtensions = {};
     state.currentSnapshotPreservedAssets = [];
+    canvasAgentCanvasDidChange(null,{clearProject:true});
     state.viewInitialized = false;
     state.aiDraftReturnMode = null;
     state.pendingHistoryRestored = false;
@@ -1956,6 +1961,121 @@
   function dot(p, erase = false, size = state.pen, userChange = false) {
     stroke(p, { x: p.x + 0.01, y: p.y + 0.01 }, erase, size, userChange);
   }
+  function areaEraseBox(gesture = state.areaEraseGesture) {
+    if (!gesture?.start || !gesture.current) return null;
+    const x = Math.min(gesture.start.x, gesture.current.x),
+      y = Math.min(gesture.start.y, gesture.current.y),
+      right = Math.max(gesture.start.x, gesture.current.x),
+      bottom = Math.max(gesture.start.y, gesture.current.y);
+    return { x, y, w:right - x, h:bottom - y };
+  }
+  function beginAreaEraseGesture(event, point) {
+    if (!valid(point)) return false;
+    supersedeActiveAI("user-input-started");
+    clearTimeout(state.timer);
+    state.timer = 0;
+    hideWidgetRefineHint();
+    clearWidgetRefineCandidate();
+    const clipped = SELECT.clipPoint(point, SIZE);
+    state.areaEraseGesture = { id:event.pointerId, start:clipped, current:clipped };
+    resetCanvasCursor();
+    requestInteractionLayerRender();
+    return true;
+  }
+  function updateAreaEraseGesture(event) {
+    const gesture = state.areaEraseGesture;
+    if (!gesture || gesture.id !== event.pointerId) return false;
+    gesture.current = SELECT.clipPoint(clientPoint(event), SIZE);
+    requestInteractionLayerRender();
+    return true;
+  }
+  function cancelAreaEraseGesture() {
+    if (!state.areaEraseGesture) return false;
+    state.areaEraseGesture = null;
+    resetCanvasCursor();
+    requestInteractionLayerRender();
+    return true;
+  }
+  function clearDirtyInkRegion(box) {
+    const touchedTiles = new Set();
+    for (const [tileKey, canvas] of state.dirtyInkTiles) {
+      const [tx, ty] = tileKey.split(",").map(Number),
+        tileBox = { x:tx * TILE, y:ty * TILE, w:TILE, h:TILE },
+        part = intersection(tileBox, box);
+      if (!part) continue;
+      canvas.getContext("2d", { willReadFrequently:true }).clearRect(
+        (part.x - tileBox.x) * DIRTY_MASK_SCALE,
+        (part.y - tileBox.y) * DIRTY_MASK_SCALE,
+        part.w * DIRTY_MASK_SCALE,
+        part.h * DIRTY_MASK_SCALE,
+      );
+      state.dirtyInkBounds.delete(tileKey);
+      touchedTiles.add(tileKey);
+    }
+    return touchedTiles;
+  }
+  function eraseInkRegion(box) {
+    if (!box || box.w <= 0 || box.h <= 0) return false;
+    save();
+    invalidateSharpOverlays(box);
+    let changed = false;
+    forTiles(
+      box.x,
+      box.y,
+      box.w,
+      box.h,
+      (canvas, tx, ty) => {
+        const tileKey = key(tx, ty),
+          tileBox = { x:tx * TILE, y:ty * TILE, w:TILE, h:TILE },
+          part = intersection(tileBox, box);
+        if (!part) return;
+        let bounds = state.inkBounds.get(tileKey);
+        if (bounds === undefined) {
+          bounds = inkBox(canvas, Math.min(TILE, SIZE - tx * TILE), Math.min(TILE, SIZE - ty * TILE));
+          state.inkBounds.set(tileKey, bounds);
+        }
+        const localPart = { x:part.x - tileBox.x, y:part.y - tileBox.y, w:part.w, h:part.h };
+        if (!bounds || !intersection(bounds, localPart)) return;
+        recordBefore(tx, ty);
+        canvas.getContext("2d").clearRect(localPart.x, localPart.y, localPart.w, localPart.h);
+        state.inkBounds.delete(tileKey);
+        changed = true;
+      },
+      false,
+    );
+    const touchedTiles = clearDirtyInkRegion(box);
+    if (!changed && !touchedTiles.size) {
+      setStatusKey("selectionEmpty");
+      requestInteractionLayerRender();
+      return false;
+    }
+    state.userRevision++;
+    if (state.pending) state.pending.latestUserRevision = state.userRevision;
+    recomputeDirtyBounds();
+    filterErasedDirtyHotspots(touchedTiles);
+    const refineCandidate = relatchWidgetRefineCandidateFromDirty();
+    save();
+    requestRender();
+    if (state.dirty && state.autoEligible && !refineCandidate) schedule();
+    setStatusKey(refineCandidate ? "widgetRefinePending" : state.pending?.items ? "batchDraftReady" : state.pending ? "draftReady" : "areaEraseDeleted");
+    return true;
+  }
+  function finishAreaEraseGesture(event) {
+    const gesture = state.areaEraseGesture;
+    if (!gesture || gesture.id !== event.pointerId) return false;
+    if (event.type !== "pointercancel") gesture.current = SELECT.clipPoint(clientPoint(event), SIZE);
+    const box = areaEraseBox(gesture);
+    state.areaEraseGesture = null;
+    resetCanvasCursor();
+    requestInteractionLayerRender();
+    if (event.type === "pointercancel") return true;
+    if (!box || box.w * state.scale < 4 || box.h * state.scale < 4) {
+      setStatusKey("areaEraseTooSmall");
+      return true;
+    }
+    eraseInkRegion(box);
+    return true;
+  }
   function pressureWidth(e) {
     if (e.pointerType !== "pen" || !Number.isFinite(e.pressure) || e.pressure <= 0) return state.pen;
     return Math.max(3, Math.min(16, state.pen * (0.72 + e.pressure * 0.7)));
@@ -2194,6 +2314,13 @@
     context.moveTo(box.x + box.w / 2 - size * 0.48, box.y + box.h);
     context.lineTo(box.x + box.w / 2 + size * 0.48, box.y + box.h);
   }
+  function drawSelectionContent(selection, context = ctx) {
+    if (selection?.phase !== "active") return;
+    for (const fragment of selection.fragments) {
+      const target = SELECT.mapFragment(fragment, selection.originalBox, selection.box);
+      context.drawImage(fragment.renderImage || fragment.image, target.x, target.y, target.w, target.h);
+    }
+  }
   function drawSelection(selection, context = ctx) {
     const ctx = context,
       unit = 1 / state.scale,
@@ -2210,10 +2337,7 @@
       ctx.restore();
       return;
     }
-    for (const fragment of selection.fragments) {
-      const target = SELECT.mapFragment(fragment, selection.originalBox, selection.box);
-      ctx.drawImage(fragment.renderImage || fragment.image, target.x, target.y, target.w, target.h);
-    }
+    drawSelectionContent(selection, ctx);
     const path = selectionPathFor(selection);
     ctx.save();
     ctx.strokeStyle = "#2679b8";

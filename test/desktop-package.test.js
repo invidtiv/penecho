@@ -8,7 +8,8 @@ const os = require("node:os");
 const path = require("node:path");
 const { kimiPresetUpdates, normalizeSettings, publicSettings } = require("../desktop/settings-contract.js");
 const { readSecret, writeSecret } = require("../desktop/secret-store.js");
-const { installCli, installInvocation, managedCliPath } = require("../desktop/cli-installer.js");
+const { inspectCli, installCli, installInvocation, managedCliPath } = require("../desktop/cli-installer.js");
+const { pathExecutables } = require("../src/providers/cli-discovery.js");
 const {
   RELEASE_API_URL, createUpdateManager, downloadReleaseAsset, expectedAssetName, installDownloadedUpdate, macBundlePath, releaseAsset,
 } = require("../desktop/update-manager.js");
@@ -52,7 +53,11 @@ test("desktop settings support CLI providers without exposing API secrets", () =
   assert.equal(JSON.stringify(visible).includes("never-return-this"), false);
   assert.equal(publicSettings({ env:{} }).host, "0.0.0.0");
   assert.equal(publicSettings({ env:{} }).autoDelay, "5");
+  assert.equal(publicSettings({ env:{} }).canvasAgentAutoOpen, true);
+  assert.equal(publicSettings({ env:{ PENECHO_CANVAS_AGENT_AUTO_OPEN:"false" } }).canvasAgentAutoOpen, false);
   assert.equal(normalizeSettings(base({ autoDelay:undefined })).updates.AUTO_AI_DELAY_SECONDS, "5");
+  assert.equal(normalizeSettings(base({ canvasAgentAutoOpen:false })).updates.PENECHO_CANVAS_AGENT_AUTO_OPEN, "false");
+  assert.equal(normalizeSettings(base({ canvasAgentAutoOpen:undefined })).updates.PENECHO_CANVAS_AGENT_AUTO_OPEN, "true");
   const visibleKimi = publicSettings({ provider:"kimi-cli", env:{ KIMI_CLI_PATH:"kimi", KIMI_CLI_MODEL:"kimi-code/k3" } });
   assert.equal(visibleKimi.provider, "kimi-cli");
   assert.equal(visibleKimi.kimiCliPath, "kimi");
@@ -162,17 +167,24 @@ test("desktop startup repairs stale built-in Kimi presets before starting the AP
   }), {});
 });
 
-test("desktop LAN addresses prefer physical private IPv4 interfaces", () => {
+test("desktop LAN addresses include every non-loopback IPv4 interface and prioritize common LAN ranges", () => {
   const hosts = lanHosts({
     en0:[{ address:"192.168.1.20", family:"IPv4", internal:false }],
-    en1:[{ address:"10.0.0.5", family:"IPv4", internal:false }],
+    en1:[{ address:"10.0.0.5", family:4, internal:false }],
     utun4:[{ address:"172.16.0.2", family:"IPv4", internal:false }],
+    "vEthernet (WSL)":[{ address:"172.20.32.1", family:"IPv4", internal:false }],
+    "VMware Network Adapter VMnet1":[{ address:"192.168.56.1", family:"IPv4", internal:false }],
+    tailscale:[{ address:"100.100.1.2", family:"IPv4", internal:false }],
+    linkLocal:[{ address:"169.254.10.20", family:"IPv4", internal:false }],
+    duplicate:[{ address:"192.168.1.20", family:"IPv4", internal:false }],
+    public:[{ address:"203.0.113.8", family:"IPv4", internal:false }],
     lo0:[{ address:"127.0.0.1", family:"IPv4", internal:true }],
+    ipv6:[{ address:"2001:db8::1", family:"IPv6", internal:false }],
   });
-  assert.deepEqual(hosts, ["10.0.0.5", "192.168.1.20"]);
+  assert.deepEqual(hosts, ["192.168.1.20", "192.168.56.1", "10.0.0.5", "172.16.0.2", "172.20.32.1", "100.100.1.2", "169.254.10.20", "203.0.113.8"]);
   assert.equal(isPrivateIpv4("172.31.255.1"), true);
   assert.equal(isPrivateIpv4("172.32.0.1"), false);
-  assert.deepEqual(lanUrls(3888, hosts), ["http://10.0.0.5:3888/", "http://192.168.1.20:3888/"]);
+  assert.deepEqual(lanUrls(3888, hosts), hosts.map(host => `http://${host}:3888/`));
   assert.deepEqual(lanUrls(0, hosts), []);
 });
 
@@ -239,14 +251,18 @@ test("desktop shell and Forge config keep the renderer isolated and package nati
   assert.match(main, /stateDir = app\.getPath\("userData"\)/);
   assert.match(main, /configuration\.env\.PENECHO_CONFIG_FILE = configuration\.configFile;\s*applyEnvironment\(configuration\);[\s\S]*?server = require\("\.\.\/server\.js"\)/);
   assert.match(serverMain, /const CONNECTIONS_FILE = STATE_DIRECTORY\s*\? path\.join\(STATE_DIRECTORY, "connections\.json"\)/);
+  assert.match(serverMain, /\/api\/settings\/connections\/inspect-cli/);
+  assert.match(serverMain, /status:await inspectConnectionCli\(provider\)/);
   assert.match(serverMain, /if \(error\?\.code === "ENOENT"\) return \{ defaultName:"Default connection", connections:\[\] \}/);
   assert.match(serverMain, /fs\.mkdirSync\(path\.dirname\(CONNECTIONS_FILE\), \{ recursive:true, mode:0o700 \}\);[\s\S]*?fs\.renameSync\(temporary, CONNECTIONS_FILE\)/);
   assert.match(main, /configuration\.env\.HOST\) configuration\.env\.HOST = "0\.0\.0\.0"/);
+  assert.match(main, /const DESKTOP_VERSION = pkg\.config\?\.desktopVersion \|\| pkg\.version/);
+  assert.match(main, /publicSettings\(loaded\.configuration, \{ version:DESKTOP_VERSION/);
   assert.match(main, /createUpdateManager/);
+  assert.match(main, /createUpdateManager\(\{[\s\S]*?currentVersion:DESKTOP_VERSION/);
   assert.match(main, /updateManager\.start\(\)/);
   assert.match(main, /Check for Updates/);
-  assert.match(main, /macUpdateMenu/);
-  assert.match(main, /Install Update/);
+  assert.doesNotMatch(main, /macUpdateMenu/);
   assert.match(main, /--squirrel-\(\?:install\|updated\|uninstall\|obsolete\)/);
   assert.doesNotMatch(main, /setProgressBar/);
   assert.doesNotMatch(main, /\bautoUpdater\b/);
@@ -256,15 +272,36 @@ test("desktop shell and Forge config keep the renderer isolated and package nati
   assert.match(preload, /copyText/);
   assert.match(canvasPreload, /penechoDesktopUpdate/);
   assert.match(canvasPreload, /installCli:provider => ipcRenderer\.invoke\("penecho:install-cli", provider\)/);
+  assert.doesNotMatch(canvasPreload, /inspectCli|get-cli-statuses/);
+  assert.doesNotMatch(canvasPreload, /pickProjectDirectory|penecho:pick-project-directory/);
+  assert.match(canvasPreload, /pickProjectFile:\(\) => ipcRenderer\.invoke\("penecho:pick-project-file"\)/);
+  assert.match(canvasPreload, /hasClipboardFile:\(\) => ipcRenderer\.sendSync\("penecho:has-clipboard-file"\)/);
+  assert.match(canvasPreload, /readClipboardFile:\(\) => ipcRenderer\.invoke\("penecho:read-clipboard-file"\)/);
+  assert.match(canvasPreload, /readClipboardFiles:\(\) => ipcRenderer\.invoke\("penecho:read-clipboard-files"\)/);
+  assert.match(canvasPreload, /openProjectFile:projectId => ipcRenderer\.invoke\("penecho:open-project-file", projectId\)/);
+  assert.match(main, /ipcMain\.on\("penecho:has-clipboard-file"[\s\S]*?fromCanvas\(event\)/);
+  assert.match(main, /ipcMain\.handle\("penecho:read-clipboard-file"[\s\S]*?fromCanvas\(event\)/);
+  assert.match(main, /ipcMain\.handle\("penecho:read-clipboard-files"[\s\S]*?fromCanvas\(event\)/);
+  assert.match(main, /public\.file-url[\s\S]*?text\/uri-list[\s\S]*?x-special\/gnome-copied-files/);
+  assert.match(main, /CANVAS_AGENT_CLIPBOARD_FILE_LIMIT = 32 \* 1024 \* 1024/);
+  assert.match(main, /CANVAS_AGENT_CLIPBOARD_FILE_COUNT_LIMIT = 5/);
+  assert.match(main, /ipcMain\.handle\("penecho:open-project-file"[\s\S]*?fromCanvas\(event\)[\s\S]*?canvasAgentDesktopProjectStore\(\)\.resolve[\s\S]*?shell\.openPath\(project\.path\)/);
+  assert.doesNotMatch(main, /penecho:pick-project-directory|properties:\["openDirectory"/);
+  assert.match(main, /issueNativePickerGrant.*require\("\.\.\/src\/server\/canvas-agent\/native-picker-grants\.js"\)/);
   assert.doesNotMatch(canvasPreload, /openSettings/);
-  assert.match(canvasPreload, /process\.platform !== "win32"/);
-  assert.match(canvasPreload, /What's new/);
+  assert.match(canvasPreload, /\["darwin", "win32"\]\.includes\(process\.platform\)/);
+  assert.match(canvasPreload, /`New\$\{version\} \\u00b7 Upgrade`/);
+  assert.match(canvasPreload, /新版本/);
   assert.match(canvasPreload, /desktop-update-progress/);
-  assert.match(updateCss, /\.desktop-update-banner/);
-  assert.match(updateCss, /\.desktop-update-notes/);
+  assert.match(canvasPreload, /document\.querySelector\("main > footer"\)/);
+  assert.match(canvasPreload, /\(footer \|\| document\.body\)\.append\(prompt\)/);
+  assert.match(updateCss, /\.desktop-update-prompt\s*\{[\s\S]*?position: static;[\s\S]*?grid-column: 4;/);
+  assert.match(updateCss, /main > footer\.penecho-desktop-update-visible/);
+  assert.match(updateCss, /\.desktop-update-prompt\.is-available \.desktop-update-primary\s*\{[^}]*min-height: 28px;/);
   assert.match(main, /\["api", "kimi"\]\.includes\(normalized\.provider\)/);
   assert.match(main, /if \(!configurationIsReady\(loaded\)\) \{\s*showSettings\(\);\s*return;/);
   assert.match(main, /label:"Settings…"[\s\S]*?click:showSettings/);
+  assert.match(main, /function showSettings\(\) \{\s*const parent = mainWindow && !mainWindow\.isDestroyed\(\) \? mainWindow : null;[\s\S]*?getParentWindow\(\) !== parent[\s\S]*?setParentWindow\(parent\)[\s\S]*?new BrowserWindow\(secureWindowOptions\(\{\s*\.\.\.\(parent \? \{ parent \} : \{\}\),/);
   assert.match(main, /if \(!fromCanvas\(event\) && !fromSetup\) return \{ ok:false/);
   assert.match(main, /window\.loadFile\(SETTINGS_FILE\)\.then\(reveal\)/);
   assert.match(main, /settingsReadyToLaunch = true;[\s\S]*?ok:false,[\s\S]*?saved:true/);
@@ -281,8 +318,19 @@ test("desktop shell and Forge config keep the renderer isolated and package nati
   assert.match(settings, /activeProvider = settings\.provider;[\s\S]*?repairKimiPreset\(\);[\s\S]*?captureApiDraft\(activeProvider\)/);
   assert.match(settings, /provider\(\) === "kimi" && value\("kimiProduct"\) === "platform"/);
   assert.match(settings, /anthropicOption\.disabled = kimiPlatform/);
-  assert.match(forge, /node_modules\/\{sharp,@img\}/);
+  assert.match(html, /name="canvasAgentAutoOpen"[^>]*checked/);
+  assert.match(settings, /canvasAgentAutoOpen:form\.elements\.canvasAgentAutoOpen\.checked/);
+  assert.match(serverMain, /canvasAgentAutoOpen:CANVAS_AGENT_AUTO_OPEN/);
+  assert.match(forge, /node_modules\/\{sharp,@img,@vscode\}/);
   assert.match(forge, /readPackageJson/);
+  assert.match(forge, /const DESKTOP_VERSION = pkg\.config\.desktopVersion/);
+  assert.match(forge, /appVersion:DESKTOP_VERSION/);
+  assert.match(forge, /buildVersion:DESKTOP_VERSION/);
+  assert.match(forge, /version:DESKTOP_VERSION/);
+  assert.match(forge, /\^\\\/\\\./);
+  for (const directory of ["build", "docs", "fixtures", "logs", "output", "scripts", "spec", "test", "testcase"]) {
+    assert.match(forge,new RegExp(`\\^\\\\\\/${directory}`),directory);
+  }
   assert.match(forge, /\^\\\/tools/);
   assert.match(forge, /maker-dmg/);
   assert.match(forge, /maker-squirrel/);
@@ -333,7 +381,8 @@ test("desktop shell and Forge config keep the renderer isolated and package nati
   assert.match(otherGroup, /value="codex-cli"/);
   assert.match(otherGroup, /value="claude-cli"/);
   assert.ok(html.indexOf("kimi-provider-group") < html.indexOf("otherProviderGroupTitle"));
-  assert.equal(rootPackage.version, "1.0.1");
+  assert.equal(rootPackage.version, "1.1.0");
+  assert.equal(rootPackage.config.desktopVersion, "1.1.0");
   assert.match(html, /data-install-cli="kimi-cli"/);
   assert.match(html, /github\.com\/MoonshotAI\/kimi-code/);
   assert.match(html, /data-i18n="installGuide">Guide<\/a>/);
@@ -349,6 +398,29 @@ test("desktop shell and Forge config keep the renderer isolated and package nati
   assert.match(html, /platform\.kimi\.com\?aff=penecho/);
   assert.match(html, /platform\.kimi\.ai\?aff=penecho/);
   assert.match(html, /Content-Security-Policy/);
+});
+
+test("desktop Canvas file picker is sender-guarded, single-file, and type-limited", () => {
+  const main = fs.readFileSync(path.join(ROOT, "desktop", "main.js"), "utf8"),
+    canvasPreload = fs.readFileSync(path.join(ROOT, "desktop", "canvas-preload.js"), "utf8"),
+    handler = main.match(/ipcMain\.handle\("penecho:pick-project-file", async event => \{([\s\S]*?)\n  \}\);/)?.[1] || "";
+
+  assert.match(canvasPreload, /pickProjectFile:\(\) => ipcRenderer\.invoke\("penecho:pick-project-file"\)/);
+  assert.match(handler, /if \(!fromCanvas\(event\)\) return \{ canceled:true \}/);
+  assert.match(handler, /dialog\.showOpenDialog\(mainWindow, \{/);
+  assert.match(handler, /properties:\["openFile"\]/);
+  assert.doesNotMatch(handler, /multiSelections/);
+  assert.match(handler, /name:"Documents", extensions:\["pdf", "docx", "xlsx", "csv", "pptx"\]/);
+  assert.match(handler, /name:"SQLite databases", extensions:\["db", "sqlite", "sqlite3"\]/);
+  assert.match(handler, /name:"Images", extensions:\["png", "jpg", "jpeg", "webp", "gif"\]/);
+  assert.match(handler, /name:"Text, source, and configuration"/);
+  for (const extension of ["txt", "md", "mdx", "jsonc", "jsonl", "yaml", "svg", "ts", "mts", "py", "pyi", "scala", "bat", "sql", "proto", "astro", "toml", "conf", "diff"]) {
+    assert.match(handler, new RegExp(`"${extension}"`));
+  }
+  assert.doesNotMatch(handler, /name:"All files"|extensions:\["\*"\]/);
+  assert.match(handler, /if \(result\.canceled \|\| !selectedPath\) return \{ canceled:true \}/);
+  assert.match(handler, /pickerToken:issueNativePickerGrant\(\{ selectedPath, kind:"file" \}\)/);
+  assert.doesNotMatch(main, /penecho:pick-project-directory|kind:"folder"/);
 });
 
 test("desktop build dependencies are isolated from normal root installs", () => {
@@ -372,6 +444,7 @@ test("desktop build dependencies are isolated from normal root installs", () => 
   assert.match(runner, /cwd:ROOT/);
   assert.match(runner, /@electron-forge\/cli/);
   assert.equal((workflow.match(/npm ci --prefix tools\/electron/g) || []).length, 2);
+  assert.match(collector, /desktopVersion = pkg\.config\.desktopVersion/);
   assert.match(collector, /"\.zip"/);
   assert.match(collector, /"\.nupkg"/);
   assert.match(collector, /"RELEASES"/);
@@ -433,7 +506,7 @@ test("desktop updates resolve published GitHub Releases for each packaged target
   assert.equal(requests.length, 2);
   assert.equal(await manager.download(), true);
   assert.equal(downloads[0].asset.name, "PenEcho-0.7.1-mac-arm64.zip");
-  assert.equal(downloads[0].destination, "/tmp/penecho-updates/PenEcho-0.7.1-mac-arm64.zip");
+  assert.equal(downloads[0].destination, path.join("/tmp", "penecho-updates", "PenEcho-0.7.1-mac-arm64.zip"));
   assert.ok(states.some(state => state.status === "downloading" && state.progress === 47.2));
   assert.equal(manager.getState().status, "ready");
   assert.equal(await manager.install(), true);
@@ -447,6 +520,17 @@ test("desktop updates resolve published GitHub Releases for each packaged target
   assert.match(source, /sha256/);
   assert.equal(manager.start(), true);
   manager.stop();
+});
+
+test("desktop update checks honor the desktop-only version override", () => {
+  const manager = createUpdateManager({
+    app:{ getVersion:() => "1.1.0", getPath:() => "/tmp" },
+    currentVersion:"0.9.2",
+    platform:"win32",
+    arch:"x64",
+    logger:{ warn:() => {} },
+  });
+  assert.equal(manager.getState().currentVersion, "0.9.2");
 });
 
 test("desktop update checks stay silent when current and reset dismissal on a new process", async () => {
@@ -495,8 +579,9 @@ test("unsigned desktop updater accepts only exact PenEcho release assets", () =>
   };
   assert.equal(releaseAsset(release, "darwin", "arm64"), null);
   assert.equal(releaseAsset(release, "win32", "x64").name, "PenEcho-Setup-0.7.2-win-x64.exe");
-  assert.equal(macBundlePath("/Applications/PenEcho.app/Contents/MacOS/PenEcho"), "/Applications/PenEcho.app");
-  assert.equal(macBundlePath("/tmp/PenEcho"), "");
+  const appRoot = path.join(path.parse(process.cwd()).root, "Applications", "PenEcho.app");
+  assert.equal(macBundlePath(path.join(appRoot, "Contents", "MacOS", "PenEcho")), appRoot);
+  assert.equal(macBundlePath(path.join(os.tmpdir(), "PenEcho")), "");
 });
 
 test("unsigned desktop update download reports progress and verifies GitHub SHA-256", async () => {
@@ -604,22 +689,56 @@ test("unsigned Windows updater launches the downloaded Squirrel Setup silently",
 
 test("desktop CLI setup uses official installers without requiring npm", () => {
   const options = { platform:"darwin", home:"/Users/example", stateDir:"/Users/example/Library/Application Support/PenEcho" },
+    resolvedHome = path.resolve(options.home), resolvedStateDir = path.resolve(options.stateDir),
     kimiPath = managedCliPath("kimi-cli", options),
     codexPath = managedCliPath("codex-cli", options),
     claudePath = managedCliPath("claude-cli", options),
     kimi = installInvocation("kimi-cli", "/tmp/kimi.sh", options),
     codex = installInvocation("codex-cli", "/tmp/codex.sh", options),
     claude = installInvocation("claude-cli", "/tmp/claude.sh", options);
-  assert.equal(kimiPath, "/Users/example/Library/Application Support/PenEcho/tools/kimi/bin/kimi");
-  assert.equal(codexPath, "/Users/example/Library/Application Support/PenEcho/tools/codex/bin/codex");
-  assert.equal(claudePath, "/Users/example/.local/bin/claude");
+  assert.equal(kimiPath, path.join(resolvedStateDir, "tools", "kimi", "bin", "kimi"));
+  assert.equal(codexPath, path.join(resolvedStateDir, "tools", "codex", "bin", "codex"));
+  assert.equal(claudePath, path.join(resolvedHome, ".local", "bin", "claude"));
   assert.equal(kimi.command, "/bin/bash");
-  assert.equal(kimi.env.KIMI_INSTALL_DIR, "/Users/example/Library/Application Support/PenEcho/tools/kimi");
+  assert.equal(kimi.env.KIMI_INSTALL_DIR, path.dirname(path.dirname(kimiPath)));
   assert.equal(kimi.env.KIMI_NO_MODIFY_PATH, "1");
   assert.equal(codex.command, "/bin/sh");
   assert.equal(codex.env.CODEX_NON_INTERACTIVE, "1");
   assert.equal(codex.env.CODEX_INSTALL_DIR, path.dirname(codexPath));
   assert.deepEqual(claude.args, ["/tmp/claude.sh", "stable"]);
+});
+
+test("CLI inspection distinguishes missing, login, ready, and repair states on macOS and Windows", async () => {
+  const options = { home:"/tmp/penecho-cli-home", stateDir:"/tmp/penecho-cli-state", candidates:[] };
+  const missingMac = await inspectCli("codex-cli", { ...options, platform:"darwin", preflight:async () => ({ ok:false, issue:"missing" }) });
+  assert.equal(missingMac.state, "missing");
+  assert.equal(missingMac.installCommand, "curl -fsSL https://chatgpt.com/codex/install.sh | sh");
+  assert.equal(missingMac.loginCommand, "codex login");
+
+  const missingWindows = await inspectCli("kimi-cli", { ...options, platform:"win32", preflight:async () => ({ ok:false, issue:"missing" }) });
+  assert.equal(missingWindows.state, "missing");
+  assert.equal(missingWindows.installCommand, "irm https://code.kimi.com/kimi-code/install.ps1 | iex");
+
+  const auth = await inspectCli("claude-cli", { ...options, platform:"win32", preflight:async () => ({ ok:false, issue:"authentication", source:"system", executable:"C:\\Tools\\claude.exe" }) });
+  assert.equal(auth.state, "auth_required");
+  assert.equal(auth.loginCommand, "claude auth login");
+  assert.equal(auth.executable, "C:\\Tools\\claude.exe");
+
+  const ready = await inspectCli("codex-cli", { ...options, platform:"darwin", preflight:async () => ({ ok:true, source:"managed", executable:"/tmp/codex", version:"codex 1.2.3" }) });
+  assert.deepEqual({ state:ready.state, source:ready.source, executable:ready.executable, version:ready.version }, { state:"ready", source:"managed", executable:"/tmp/codex", version:"codex 1.2.3" });
+
+  const repair = await inspectCli("kimi-cli", { ...options, platform:"darwin", preflight:async () => ({ ok:false, issue:"execution", source:"managed", executable:"/tmp/kimi" }) });
+  assert.equal(repair.state, "repair_required");
+});
+
+test("Windows CLI discovery uses semicolon-separated PATH entries", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "penecho-win-path-")), first = path.join(directory, "first"), second = path.join(directory, "second");
+  try {
+    fs.mkdirSync(first);
+    fs.mkdirSync(second);
+    fs.writeFileSync(path.join(second, "codex.exe"), "test");
+    assert.deepEqual(pathExecutables("codex", { platform:"win32", env:{ PATH:`${first};${second}`, PATHEXT:".EXE;.CMD" } }), [path.join(second, "codex.exe")]);
+  } finally { fs.rmSync(directory, { recursive:true, force:true }); }
 });
 
 test("automatic CLI setup validates the official script and installed executable", async () => {

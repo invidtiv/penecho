@@ -93,36 +93,84 @@ function possiblyUnifiedDiffLine(line) {
   return /^(?:--- a\/|\+\+\+ b\/|@@(?: |$)|[ +\\-]|\\ No newline at end of file$)/.test(line);
 }
 
-function normalizedPatchText(value, widgetEdit) {
-  if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value, "utf8") > MAX_WIDGET_PATCH_BYTES) return "";
+function normalizedPatchText(value, widgetEdit, diagnostics = null) {
+  if (typeof value !== "string") {
+    setPatchDiagnostic(diagnostics,"patch-not-string");
+    return "";
+  }
+  const patchBytes = Buffer.byteLength(value,"utf8");
+  if (!value.trim()) {
+    setPatchDiagnostic(diagnostics,"empty-patch");
+    return "";
+  }
+  if (patchBytes > MAX_WIDGET_PATCH_BYTES) {
+    setPatchDiagnostic(diagnostics,"patch-too-large",{patchBytes,maxPatchBytes:MAX_WIDGET_PATCH_BYTES});
+    return "";
+  }
   const paths = new Set(patchFilesForWidgetEdit(widgetEdit).map(file => file.path)),
     lines = [];
   for (const line of value.replace(/\r\n/g, "\n").split("\n")) {
     const updateFile = /^\*\*\* Update File: (.+)$/.exec(line);
     if (updateFile) {
       const path = updateFile[1];
-      if (!paths.has(path)) return "";
+      if (!paths.has(path)) {
+        setPatchDiagnostic(diagnostics,"unlisted-file",{path,allowedPaths:[...paths]});
+        return "";
+      }
       lines.push(`--- a/${path}`, `+++ b/${path}`);
       continue;
     }
     // Tolerate only the common existing-file marker. Creation, deletion and
     // moves remain outside the Refine contract and must never be normalized.
-    if (/^\*\*\* (?:Add|Delete) File:/.test(line) || /^\*\*\* Move to:/.test(line)) return "";
+    if (/^\*\*\* (?:Add|Delete) File:/.test(line) || /^\*\*\* Move to:/.test(line)) {
+      setPatchDiagnostic(diagnostics,"unsupported-file-operation");
+      return "";
+    }
     lines.push(line);
+  }
+  const submittedHeaderIndex = lines.findIndex(line=>/^--- /.test(line));
+  if (submittedHeaderIndex >= 0) {
+    const oldHeader=lines[submittedHeaderIndex], newHeader=lines[submittedHeaderIndex+1]||"",
+      bareHeader=/^--- (?!a\/)(.+)$/.exec(oldHeader), canonicalHeader=/^--- a\/(.+)$/.exec(oldHeader);
+    if (bareHeader) {
+      const path=bareHeader[1];
+      setPatchDiagnostic(diagnostics,"invalid-file-header-prefix",{
+        path,
+        submittedOldHeader:oldHeader,
+        submittedNewHeader:newHeader,
+        expectedOldHeader:`--- a/${path}`,
+        expectedNewHeader:`+++ b/${path}`,
+      });
+      return "";
+    }
+    if (canonicalHeader && !paths.has(canonicalHeader[1])) {
+      setPatchDiagnostic(diagnostics,"unlisted-file",{path:canonicalHeader[1],allowedPaths:[...paths]});
+      return "";
+    }
+    if (canonicalHeader && newHeader !== `+++ b/${canonicalHeader[1]}`) {
+      setPatchDiagnostic(diagnostics,"file-header-mismatch",{
+        path:canonicalHeader[1],submittedOldHeader:oldHeader,submittedNewHeader:newHeader,
+        expectedOldHeader:oldHeader,expectedNewHeader:`+++ b/${canonicalHeader[1]}`,
+      });
+      return "";
+    }
   }
   const
     firstHeader = lines.findIndex((line, index) => {
       const match = /^--- a\/(.+)$/.exec(line), path = match?.[1];
       return Boolean(path && paths.has(path) && lines[index + 1] === `+++ b/${path}`);
     });
-  if (firstHeader < 0) return "";
+  if (firstHeader < 0) {
+    setPatchDiagnostic(diagnostics,"missing-file-header",{allowedPaths:[...paths]});
+    return "";
+  }
   const diffLines = lines.slice(firstHeader);
   while (diffLines.at(-1) === "") diffLines.pop();
   while (diffLines.length && !possiblyUnifiedDiffLine(diffLines.at(-1))) diffLines.pop();
   return diffLines.length ? `${diffLines.join("\n")}\n` : "";
 }
 
-function coalescedPatchFileSections(patchText, widgetEdit) {
+function coalescedPatchFileSections(patchText, widgetEdit, diagnostics = null) {
   if (!patchText) return "";
   const lines = patchText.split("\n"), finalNewline = lines.at(-1) === "",
     allowed = new Set(patchFilesForWidgetEdit(widgetEdit).map(file => file.path)),
@@ -131,11 +179,21 @@ function coalescedPatchFileSections(patchText, widgetEdit) {
   let cursor = 0, sectionCount = 0;
   while (cursor < lines.length) {
     const header = /^--- a\/(.+)$/.exec(lines[cursor] || ""), path = header?.[1];
-    if (!path || !allowed.has(path) || lines[cursor + 1] !== `+++ b/${path}`) return "";
+    if (!path || !allowed.has(path) || lines[cursor + 1] !== `+++ b/${path}`) {
+      setPatchDiagnostic(diagnostics,"file-header-mismatch",{path:path||null,allowedPaths:[...allowed]});
+      return "";
+    }
     cursor += 2;
     const body = [];
     while (cursor < lines.length && !/^--- a\//.test(lines[cursor])) body.push(lines[cursor++]);
-    if (!body.length || ++sectionCount > MAX_WIDGET_PATCH_HUNKS) return "";
+    if (!body.length) {
+      setPatchDiagnostic(diagnostics,"missing-hunks",{path});
+      return "";
+    }
+    if (++sectionCount > MAX_WIDGET_PATCH_HUNKS) {
+      setPatchDiagnostic(diagnostics,"too-many-file-sections",{fileSectionCount:sectionCount,maxFileSections:MAX_WIDGET_PATCH_HUNKS});
+      return "";
+    }
     if (!sections.has(path)) {
       sections.set(path, []);
       order.push(path);
@@ -145,6 +203,14 @@ function coalescedPatchFileSections(patchText, widgetEdit) {
   const output = [];
   for (const path of order) output.push(`--- a/${path}`, `+++ b/${path}`, ...sections.get(path));
   return `${output.join("\n")}${finalNewline ? "\n" : ""}`;
+}
+
+function diagnosticSequenceStarts(lines, expected, minimumStart, matchesLine = (actual, submitted) => actual === submitted) {
+  const matches = [];
+  for (let candidate = minimumStart; candidate + expected.length <= lines.length; candidate++) {
+    if (expected.every((line, index) => matchesLine(lines[candidate + index], line))) matches.push(candidate);
+  }
+  return matches;
 }
 
 function uniqueSequenceStart(lines, expected, minimumStart, matchesLine = (actual, submitted) => actual === submitted, preferredStart = null) {
@@ -192,8 +258,44 @@ function repairedNumberingTabBody(body, sourceLines, minimumStart, declaredStart
   return body.map(line => line === "\\ No newline at end of file" ? line : `${line[0]}${line.slice(2)}`);
 }
 
-function setPatchDiagnostic(diagnostics, reason) {
-  if (diagnostics && typeof diagnostics === "object" && !diagnostics.reason) diagnostics.reason = reason;
+function patchDiagnosticLine(value, limit = 240) {
+  const line = String(value ?? "");
+  return line.length > limit ? `${line.slice(0,limit)}…` : line;
+}
+
+function setPatchDiagnostic(diagnostics, reason, details = null) {
+  if (!diagnostics || typeof diagnostics !== "object" || diagnostics.reason) return;
+  diagnostics.reason = reason;
+  if (details && typeof details === "object" && !Array.isArray(details)) Object.assign(diagnostics,details);
+}
+
+function setPatchLocationDiagnostic(diagnostics, { path, hunk, oldStart, sourceLines, entries, minimumStart }) {
+  const expected = entries.map(entry => entry.content), declaredStart = Number.isSafeInteger(oldStart) && oldStart > 0 ? oldStart - 1 : null,
+    exactMatches = diagnosticSequenceStarts(sourceLines,expected,minimumStart), omittedIndentMatches = exactMatches.length ? [] : diagnosticSequenceStarts(
+      sourceLines,
+      expected,
+      minimumStart,
+      (actual, submitted) => actual === submitted || actual === ` ${submitted}`,
+    );
+  if (exactMatches.length > 1 || omittedIndentMatches.length > 1) {
+    setPatchDiagnostic(diagnostics,"ambiguous-context",{path,hunk,oldStart,matchCount:Math.max(exactMatches.length,omittedIndentMatches.length)});
+    return;
+  }
+  if (declaredStart !== null && declaredStart < minimumStart) {
+    setPatchDiagnostic(diagnostics,"out-of-order-hunk",{path,hunk,oldStart,minimumOldStart:minimumStart+1});
+    return;
+  }
+  const comparisonStart = declaredStart !== null && declaredStart >= minimumStart ? declaredStart : minimumStart;
+  let mismatchIndex = 0;
+  while (mismatchIndex < expected.length && sourceLines[comparisonStart+mismatchIndex] === expected[mismatchIndex]) mismatchIndex++;
+  setPatchDiagnostic(diagnostics,"context-mismatch",{
+    path,
+    hunk,
+    oldStart,
+    sourceLine:comparisonStart+mismatchIndex+1,
+    submittedLine:patchDiagnosticLine(expected[mismatchIndex]),
+    currentLine:patchDiagnosticLine(sourceLines[comparisonStart+mismatchIndex]),
+  });
 }
 
 function patchBodyCounts(body) {
@@ -228,7 +330,10 @@ function canonicalPatchCounts(patchText, widgetEdit, diagnostics = null) {
   let cursor = 0, fileCount = 0;
   while (cursor < lines.length) {
     const fileHeader = /^--- a\/(.+)$/.exec(lines[cursor] || ""), path = fileHeader?.[1];
-    if (!path || !files.has(path) || lines[cursor + 1] !== `+++ b/${path}`) return "";
+    if (!path || !files.has(path) || lines[cursor + 1] !== `+++ b/${path}`) {
+      setPatchDiagnostic(diagnostics,"file-header-mismatch",{path:path||null,allowedPaths:[...files.keys()]});
+      return "";
+    }
     output.push(lines[cursor], lines[cursor + 1]);
     cursor += 2;
     fileCount++;
@@ -238,7 +343,10 @@ function canonicalPatchCounts(patchText, widgetEdit, diagnostics = null) {
       const rawHeader = lines[cursor] || "",
         header = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/.exec(rawHeader),
         bareHeader = !header && /^@@[ \t]*$/.test(rawHeader);
-      if (!header && !bareHeader) return "";
+      if (!header && !bareHeader) {
+        setPatchDiagnostic(diagnostics,"invalid-hunk-header",{path,hunk:hunkCount+1,submittedHeader:patchDiagnosticLine(rawHeader)});
+        return "";
+      }
       let oldStart = header ? Number(header[1]) : null, newStart = header ? Number(header[2]) : null;
       if (header && (!Number.isSafeInteger(oldStart) || !Number.isSafeInteger(newStart))) return "";
       cursor++;
@@ -253,10 +361,16 @@ function canonicalPatchCounts(patchText, widgetEdit, diagnostics = null) {
           newLines++;
         } else if (operation === "-") oldLines++;
         else if (operation === "+") newLines++;
-        else return "";
+        else {
+          setPatchDiagnostic(diagnostics,"invalid-hunk-body-line",{path,hunk:hunkCount+1,line:patchDiagnosticLine(line)});
+          return "";
+        }
         body.push(line);
       }
-      if (!body.length) return "";
+      if (!body.length) {
+        setPatchDiagnostic(diagnostics,"empty-hunk",{path,hunk:hunkCount+1});
+        return "";
+      }
       const tabRepairedBody = repairedNumberingTabBody(body,sourceLines,previousEnd,header && oldLines > 0 ? oldStart - 1 : null);
       if (tabRepairedBody) body = tabRepairedBody;
       const expectedEntries = body
@@ -297,7 +411,10 @@ function canonicalPatchCounts(patchText, widgetEdit, diagnostics = null) {
           newStart = locatedStart + lineOffset + (newLines === 0 ? 0 : 1);
         } else {
           const located = uniquelyLocatedPatchSequence(sourceLines, currentExpectedEntries, previousEnd, declaredStart);
-          if (!located) return "";
+          if (!located) {
+            if (diagnostics?.includeLocationDetails === true) setPatchLocationDiagnostic(diagnostics,{path,hunk:hunkCount+1,oldStart,sourceLines,entries:currentExpectedEntries,minimumStart:previousEnd});
+            return "";
+          }
           locatedStart = located.start;
           if (located.repaired) {
             currentExpectedEntries.forEach((entry, index) => {
@@ -333,7 +450,10 @@ function canonicalPatchCounts(patchText, widgetEdit, diagnostics = null) {
       lineOffset += newLines - oldLines;
       hunkCount++;
     }
-    if (!hunkCount) return "";
+    if (!hunkCount) {
+      setPatchDiagnostic(diagnostics,"missing-hunks",{path});
+      return "";
+    }
   }
   if (!fileCount) return "";
   return `${output.join("\n")}${finalNewline ? "\n" : ""}`;
@@ -460,20 +580,34 @@ function widgetCommandFromFiles(contents, widgetEdit, diagnostics = null) {
 
 function parsedWidgetPatch(command, widgetEdit, diagnostics = null) {
   if (!command || typeof command !== "object" || Array.isArray(command)
-    || command.tool !== "widget_patch" || Object.keys(command).some(key => !["tool", "patch"].includes(key))) return null;
-  const normalized = normalizedPatchText(command.patch, widgetEdit),
-    submittedPatchText = coalescedPatchFileSections(normalized, widgetEdit),
+    || command.tool !== "widget_patch" || Object.keys(command).some(key => !["tool", "patch"].includes(key))) {
+    setPatchDiagnostic(diagnostics,"invalid-patch-command");
+    return null;
+  }
+  const normalized = normalizedPatchText(command.patch, widgetEdit, diagnostics),
+    submittedPatchText = coalescedPatchFileSections(normalized, widgetEdit, diagnostics),
     patchText = canonicalPatchCounts(submittedPatchText, widgetEdit, diagnostics);
   if (!submittedPatchText || !patchText) return null;
   let patches;
   try {
     patches = parsePatch(patchText);
   } catch {
+    setPatchDiagnostic(diagnostics,"malformed-unified-diff");
     return null;
   }
   const files = patchFilesForWidgetEdit(widgetEdit), allowed = new Map(files.map(file => [file.path, file]));
-  if (!patches.length || patches.length > Math.min(MAX_WIDGET_PATCH_FILES, files.length)
-    || !exactPatchEnvelope(patchText.split("\n"), patches)) return null;
+  if (!patches.length) {
+    setPatchDiagnostic(diagnostics,"missing-file-sections");
+    return null;
+  }
+  if (patches.length > Math.min(MAX_WIDGET_PATCH_FILES, files.length)) {
+    setPatchDiagnostic(diagnostics,"too-many-files",{fileCount:patches.length,maxFiles:Math.min(MAX_WIDGET_PATCH_FILES,files.length)});
+    return null;
+  }
+  if (!exactPatchEnvelope(patchText.split("\n"), patches)) {
+    setPatchDiagnostic(diagnostics,"invalid-patch-envelope");
+    return null;
+  }
   const seen = new Set();
   let hunkCount = 0, lineCount = 0, hasChange = false;
   for (const patch of patches) {
@@ -482,10 +616,23 @@ function parsedWidgetPatch(command, widgetEdit, diagnostics = null) {
     hunkCount += patch.hunks.length;
     lineCount += patch.hunks.reduce((count, hunk) => count + hunk.lines.length, 0);
     hasChange ||= patch.hunks.some(hunk => hunk.lines.some(line => line[0] === "+" || line[0] === "-"));
-    if (!allowed.has(path) || seen.has(path) || oldPath !== `a/${path}` || newPath !== `b/${path}`
-      || !patch.hunks.length || patch.isRename || patch.isCopy || patch.isCreate || patch.isDelete || patch.isBinary) return null;
+    if (!allowed.has(path) || seen.has(path) || oldPath !== `a/${path}` || newPath !== `b/${path}`) {
+      setPatchDiagnostic(diagnostics,"invalid-file-path",{oldPath,newPath,allowedPaths:[...allowed.keys()]});
+      return null;
+    }
+    if (!patch.hunks.length) {
+      setPatchDiagnostic(diagnostics,"missing-hunks",{path});
+      return null;
+    }
+    if (patch.isRename || patch.isCopy || patch.isCreate || patch.isDelete || patch.isBinary) {
+      setPatchDiagnostic(diagnostics,"unsupported-file-operation",{path});
+      return null;
+    }
     seen.add(path);
   }
+  if (!hasChange) setPatchDiagnostic(diagnostics,"patch-has-no-changes");
+  else if (hunkCount > MAX_WIDGET_PATCH_HUNKS) setPatchDiagnostic(diagnostics,"too-many-hunks",{hunkCount,maxHunks:MAX_WIDGET_PATCH_HUNKS});
+  else if (lineCount > MAX_WIDGET_PATCH_LINES) setPatchDiagnostic(diagnostics,"too-many-patch-lines",{lineCount,maxLines:MAX_WIDGET_PATCH_LINES});
   return hasChange && hunkCount <= MAX_WIDGET_PATCH_HUNKS && lineCount <= MAX_WIDGET_PATCH_LINES ? { patches, allowed } : null;
 }
 
@@ -496,14 +643,21 @@ function commandFromWidgetPatch(command, widgetEdit, diagnostics = null) {
   for (const patch of parsed.patches) {
     const path = patch.oldFileName.slice(2), file = parsed.allowed.get(path);
     const exactPatch = exactContextPatch(file.content, patch);
-    if (!exactPatch) return null;
+    if (!exactPatch) {
+      setPatchDiagnostic(diagnostics,"context-mismatch",{path});
+      return null;
+    }
     let content;
     try {
       content = applyPatch(file.content, exactPatch, { fuzzFactor:0 });
     } catch {
+      setPatchDiagnostic(diagnostics,"patch-apply-failed",{path});
       return null;
     }
-    if (content === false) return null;
+    if (content === false) {
+      setPatchDiagnostic(diagnostics,"patch-apply-failed",{path});
+      return null;
+    }
     updated.set(path, content);
   }
   const originalContents = new Map(files.map(file => [file.path,file.originalContent])),
@@ -513,7 +667,14 @@ function commandFromWidgetPatch(command, widgetEdit, diagnostics = null) {
     })),
     originalCommand = widgetCommandFromFiles(originalContents,widgetEdit),
     updatedCommand = widgetCommandFromFiles(finalContents,widgetEdit,diagnostics);
-  if (!originalCommand || !updatedCommand || JSON.stringify(updatedCommand) === JSON.stringify(originalCommand)) return null;
+  if (!originalCommand || !updatedCommand) {
+    setPatchDiagnostic(diagnostics,"invalid-widget-result");
+    return null;
+  }
+  if (JSON.stringify(updatedCommand) === JSON.stringify(originalCommand)) {
+    setPatchDiagnostic(diagnostics,"patch-has-no-changes");
+    return null;
+  }
   return updatedCommand;
 }
 

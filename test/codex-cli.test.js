@@ -31,7 +31,7 @@ test("builds a non-interactive read-only Codex invocation", () => {
   assert.ok(args.includes("image.png"));
   assert.ok(args.includes("answer.txt"));
   assert.ok(args.includes("test-model"));
-  assert.ok(args.includes('model_reasoning_effort="xhigh"'));
+  assert.ok(args.includes('model_reasoning_effort="max"'));
   assert.equal(args.some(value => /temperature/i.test(String(value))), false);
   assert.ok(args.includes("--json"));
   assert.equal(args.includes("--oss"), false);
@@ -43,15 +43,21 @@ test("leaves Codex reasoning effort unset when the global value is empty", () =>
   assert.equal(args.some(value => String(value).startsWith("model_reasoning_effort=")), false);
 });
 
-test("maps maximum effort to the model's supported Codex ceiling", () => {
-  assert.ok(buildCodexArgs({ workDir:"work", imageFile:null, outputFile:"answer.txt", model:"gpt-5.5", effort:"max" }).includes('model_reasoning_effort="xhigh"'));
+test("passes the configured Codex effort through without model-family mapping", () => {
+  assert.ok(buildCodexArgs({ workDir:"work", imageFile:null, outputFile:"answer.txt", model:"gpt-5.5", effort:"max" }).includes('model_reasoning_effort="max"'));
   assert.ok(buildCodexArgs({ workDir:"work", imageFile:null, outputFile:"answer.txt", model:"gpt-5.6-sol", effort:"max" }).includes('model_reasoning_effort="max"'));
+  assert.ok(buildCodexArgs({ workDir:"work", imageFile:null, outputFile:"answer.txt", model:"gpt-5.6-sol", effort:"Provider_Native" }).includes('model_reasoning_effort="Provider_Native"'));
 });
 
 test("omits the Codex image argument for a text-only request", () => {
   const args = buildCodexArgs({ workDir:"work", imageFile:null, outputFile:"answer.txt", model:null, effort:null });
   assert.equal(args.includes("-i"), false);
   assert.ok(args.includes("answer.txt"));
+});
+
+test("attaches up to five Codex vision files in message order", () => {
+  const args=buildCodexArgs({workDir:"work",imageFiles:["one.png","two.webp"],outputFile:"answer.txt",model:null,effort:null});
+  assert.deepEqual(args.flatMap((value,index)=>value==="-i"?[args[index+1]]:[]),["one.png","two.webp"]);
 });
 
 test("passes only the required environment to the Codex process", () => {
@@ -167,12 +173,12 @@ process.stdout.write(JSON.stringify({type:"thread.started",thread_id:"test"})+"\
 process.stdout.write(JSON.stringify({type:"turn.started"})+"\\n");
 setTimeout(() => {
   process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:${JSON.stringify(response)}}})+"\\n");
-  process.stdout.write(JSON.stringify({type:"turn.completed",usage:{}})+"\\n");
+  process.stdout.write(JSON.stringify({type:"turn.completed",usage:{input_tokens:140,cached_input_tokens:90,output_tokens:12}})+"\\n");
   setInterval(() => {}, 1000);
 }, 150);
 `);
   try {
-    let reportReceiving,activityCount=0;
+    let reportReceiving,activityCount=0,reportedUsage=null;
     const receiving = new Promise(resolve => { reportReceiving=resolve; }), request = callCodexCli({
       executable:fakeCli,
       prompt:"stream",
@@ -180,6 +186,7 @@ setTimeout(() => {
       env:testCodexEnv(directory),
       onProgress:phase => { if(phase === "receiving")reportReceiving(); },
       onActivity:() => activityCount++,
+      onUsage:usage => { reportedUsage=usage; },
     });
     assert.equal(await Promise.race([receiving.then(() => "receiving"), request.then(() => "resolved")]), "receiving");
     let completionTimer;
@@ -189,6 +196,7 @@ setTimeout(() => {
     const content = await Promise.race([request, completionDeadline]).finally(() => clearTimeout(completionTimer));
     assert.equal(JSON.parse(content).message, "immediate");
     assert.ok(activityCount>0);
+    assert.deepEqual(reportedUsage,{input_tokens:140,cached_input_tokens:90,output_tokens:12});
     const workDir = await fs.promises.readFile(marker, "utf8"), deadline=Date.now()+5000;
     while(fs.existsSync(workDir)&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,20));
     assert.equal(fs.existsSync(workDir), false);

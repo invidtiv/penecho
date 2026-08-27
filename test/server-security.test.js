@@ -130,6 +130,57 @@ function startApiServer(responseContent = '{"intent":"none","commands":[]}', opt
   });
 }
 
+function startModelDiscoveryServer() {
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", chunk => chunks.push(chunk));
+    req.on("end", () => {
+      const request = {
+        method:req.method,
+        path:req.url,
+        authorization:String(req.headers.authorization || ""),
+        xApiKey:String(req.headers["x-api-key"] || ""),
+        anthropicVersion:String(req.headers["anthropic-version"] || ""),
+        accept:String(req.headers.accept || ""),
+        body:Buffer.concat(chunks).toString("utf8"),
+      };
+      requests.push(request);
+      if (request.path === "/openai/v1/models") {
+        res.writeHead(200, { "Content-Type":"application/json" });
+        res.end(JSON.stringify({ data:[{ id:"zeta-model" }, { model:"alpha-model" }, "alpha-model", { name:"gamma-model" }] }));
+        return;
+      }
+      if (request.path === "/anthropic/v1/models") {
+        res.writeHead(200, { "Content-Type":"application/json; charset=utf-8" });
+        res.end(JSON.stringify(["claude-4-model", "claude-3-model", "claude-4-model"]));
+        return;
+      }
+      if (request.path === "/error/v1/models") {
+        res.writeHead(401, { "Content-Type":"application/json" });
+        res.end(JSON.stringify({ error:"provider-secret-error-body" }));
+        return;
+      }
+      if (request.path === "/malformed/v1/models") {
+        res.writeHead(200, { "Content-Type":"application/json" });
+        res.end(JSON.stringify({ data:{ id:"invalid-envelope" } }));
+        return;
+      }
+      if (request.path === "/plain/v1/models") {
+        res.writeHead(200, { "Content-Type":"text/plain; charset=utf-8" });
+        res.end("[]");
+        return;
+      }
+      res.writeHead(404, { "Content-Type":"application/json" });
+      res.end("{}");
+    });
+  });
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve({ server, requests, origin:`http://127.0.0.1:${server.address().port}` }));
+  });
+}
+
 function outboundModelText(rawRequest) {
   const request = JSON.parse(rawRequest);
   return request.messages[1].content.find(part => part.type === "text").text;
@@ -385,25 +436,48 @@ test("server uses applied global configuration and one timeout for every executo
 });
 
 test("Codex CLI mode starts with no extra access or model-provider settings", { timeout: 10000 }, async () => {
-  const {child,origin}=await startServer(serverEnv({HOST:"0.0.0.0"}));
+  const {child,origin}=await startServer(serverEnv({HOST:"0.0.0.0",DEEPSEEK_API_KEY:"",DEEPSEEK_SEARCH_API_KEY:"",TAVILY_API_KEY:""}));
   try {
     const localPage=await fetch(origin);
     assert.equal(localPage.status,200);
     assert.ok(localPage.headers.get("set-cookie"));
     const config=await fetch(`${origin}/api/config`).then(response=>response.json());
     assert.equal(config.aiEffort,"config");
+    assert.equal(config.canvasAgentSearchConfigured,true);
+    const settings=await fetch(`${origin}/api/settings`,{headers:{Origin:origin}}).then(response=>response.json());
+    assert.equal(settings.deepSeekSearchProvider,"deepseek-official");
+    assert.equal(settings.hasDeepSeekSearchApiKey,false);
+    assert.equal(settings.hasTavilyApiKey,false);
+    assert.equal(settings.webSearchAvailable,true);
   } finally { await stopServer(child); }
 });
 
 test("canvas settings expose no API secret and save validated configuration for restart", { timeout:10000 }, async () => {
-  const { child, origin, stateDir } = await startServer(apiServerEnv("https://api.example.test", { AI_API_KEY:"saved-secret" }));
+  const { child, origin, stateDir } = await startServer(apiServerEnv("https://api.example.test", { AI_API_KEY:"saved-secret", DEEPSEEK_SEARCH_API_KEY:"saved-deepseek-secret", TAVILY_API_KEY:"saved-tavily-secret" }));
   try {
     const headers = { Origin:origin, "Content-Type":"application/json" };
     const currentResponse = await fetch(`${origin}/api/settings`, { headers:{ Origin:origin } }), current = await currentResponse.json();
     assert.equal(currentResponse.status, 200);
     assert.equal(current.hasApiKey, true);
+    assert.equal(current.deepSeekSearchProvider, "deepseek-official");
+    assert.equal(current.hasDeepSeekSearchApiKey, true);
+    assert.equal(current.hasTavilyApiKey, true);
+    assert.equal(current.webSearchAvailable, true);
     assert.equal(Object.hasOwn(current, "apiKey"), false);
+    assert.equal(Object.hasOwn(current, "deepseekSearchApiKey"), false);
+    assert.equal(Object.hasOwn(current, "tavilyApiKey"), false);
     assert.equal(current.maxTokens, 20000);
+    const invalidSearchTestResponse=await fetch(`${origin}/api/settings/search/test`,{method:"POST",headers,body:JSON.stringify({deepSeekSearchProvider:"opencode-go",deepseekSearchApiKey:"bad\nkey",tavilyApiKey:""})}),invalidSearchTest=await invalidSearchTestResponse.json();
+    assert.equal(invalidSearchTestResponse.status,400);
+    assert.doesNotMatch(JSON.stringify(invalidSearchTest),/saved-(?:deepseek|tavily)-secret/);
+    const searchResponse = await fetch(`${origin}/api/settings`, { method:"POST", headers, body:JSON.stringify({ scope:"search", deepSeekSearchProvider:"opencode-go", deepseekSearchApiKey:"sk-deepseek-next-secret", tavilyApiKey:"tvly-next-secret" }) }), search = await searchResponse.json();
+    assert.equal(searchResponse.status, 200, JSON.stringify(search));
+    assert.equal(search.searchApplied, true);
+    assert.equal(search.deepSeekSearchProvider, "opencode-go");
+    assert.equal(search.hasDeepSeekSearchApiKey, true);
+    assert.equal(search.hasTavilyApiKey, true);
+    assert.equal(search.webSearchAvailable, true);
+    assert.equal((await fetch(`${origin}/api/config`).then(response => response.json())).canvasAgentSearchConfigured, true);
     const savedResponse = await fetch(`${origin}/api/settings`, {
       method:"POST", headers,
       body:JSON.stringify({ scope:"api", provider:"api", apiFormat:"anthropic", apiUrl:"https://api.example.test/anthropic/", apiModel:"model-next", apiKey:"", effort:"high", timeoutSeconds:120, autoDelaySeconds:2.5, imageFormat:"png", requestTrace:true, requestTraceLimit:25 }),
@@ -416,6 +490,9 @@ test("canvas settings expose no API secret and save validated configuration for 
     assert.match(text, /^AI_API_URL=https:\/\/api\.example\.test\/anthropic$/m);
     assert.match(text, /^AI_API_MODEL=model-next$/m);
     assert.match(text, /^AI_API_KEY=saved-secret$/m);
+    assert.match(text, /^DEEPSEEK_SEARCH_API_KEY=sk-deepseek-next-secret$/m);
+    assert.match(text, /^DEEPSEEK_SEARCH_PROVIDER=opencode-go$/m);
+    assert.match(text, /^TAVILY_API_KEY=tvly-next-secret$/m);
     assert.doesNotMatch(text, /^AUTO_AI_DELAY_SECONDS=/m);
     const switchedResponse = await fetch(`${origin}/api/settings`, { method:"POST", headers, body:JSON.stringify({ ...current, scope:"api", provider:"codex-cli", codexModel:"gpt-hot", codexPath:"codex-next", effort:"high", timeoutSeconds:120, autoDelaySeconds:5, imageFormat:"webp", requestTrace:false, requestTraceLimit:100 }) });
     assert.equal(switchedResponse.status, 200);
@@ -457,9 +534,18 @@ test("canvas shares ten persistent API and CLI connections without a server-wide
     const removeDefaulted = await fetch(`${origin}/api/settings/connections`, { method:"POST", headers, body:JSON.stringify({ action:"delete", id:emptyEffortBody.savedId }) });
     assert.equal(removeDefaulted.status, 200);
 
+    const customEffort = "Provider_Native";
+    const customResponse = await fetch(`${origin}/api/settings/connections`, { method:"POST", headers, body:JSON.stringify({ action:"save", connection:{ provider:"api", apiFormat:"openai", apiUrl:"https://custom.example.test/v1", apiModel:"custom", apiKey:"custom", effort:customEffort } }) }), customBody = await customResponse.json();
+    assert.equal(customResponse.status, 200, JSON.stringify(customBody));
+    assert.equal(customBody.connections.find(connection => connection.id === customBody.savedId)?.effort, customEffort);
+    const customStore = JSON.parse(await fs.promises.readFile(path.join(stateDir, "connections.json"), "utf8"));
+    assert.equal(customStore.connections.find(connection => connection.id === customBody.savedId)?.effort, customEffort);
+    const removeCustom = await fetch(`${origin}/api/settings/connections`, { method:"POST", headers, body:JSON.stringify({ action:"delete", id:customBody.savedId }) });
+    assert.equal(removeCustom.status, 200);
+
     const missingCliTest = await fetch(`${origin}/api/settings/connections/test`, { method:"POST", headers, body:JSON.stringify({ connection:{ provider:"codex-cli", cliPath:path.join(stateDir, "missing-codex"), effort:"xhigh" } }) }), missingCliBody = await missingCliTest.json();
     assert.equal(missingCliTest.status, 400);
-    assert.equal(missingCliBody.installable, true);
+    assert.equal(missingCliBody.installable, true, JSON.stringify(missingCliBody));
     assert.equal(missingCliBody.provider, "codex-cli");
     assert.match(missingCliBody.guidance, /chatgpt\.com\/codex\/install\.sh/);
     assert.match(missingCliBody.guidance, /codex login/);
@@ -468,7 +554,7 @@ test("canvas shares ten persistent API and CLI connections without a server-wide
 
     const missingKimiTest = await fetch(`${origin}/api/settings/connections/test`, { method:"POST", headers, body:JSON.stringify({ connection:{ provider:"kimi-cli", cliPath:path.join(stateDir, "missing-kimi"), effort:"high" } }) }), missingKimiBody = await missingKimiTest.json();
     assert.equal(missingKimiTest.status, 400);
-    assert.equal(missingKimiBody.installable, true);
+    assert.equal(missingKimiBody.installable, true, JSON.stringify(missingKimiBody));
     assert.equal(missingKimiBody.provider, "kimi-cli");
     assert.match(missingKimiBody.guidance, /code\.kimi\.com\/kimi-code\/install\.sh/);
     assert.match(missingKimiBody.guidance, /kimi login/);
@@ -481,6 +567,10 @@ test("canvas shares ten persistent API and CLI connections without a server-wide
     assert.ok(codex?.removable);
     assert.equal(codex.name, "gpt-5.6-sol");
     assert.equal(created.connections.length, 2);
+
+    const edit = await fetch(`${origin}/api/settings/connections`, { method:"POST", headers, body:JSON.stringify({ action:"save", id:codex.id, connection:{ provider:"codex-cli", cliModel:"gpt-5.6-sol-edited", cliPath:"codex", effort:"high" } }) }), edited = await edit.json();
+    assert.equal(edit.status, 200, JSON.stringify(edited));
+    assert.equal(edited.connections.find(connection => connection.id === codex.id)?.name, "gpt-5.6-sol-edited");
 
     const activate = await fetch(`${origin}/api/settings/connections`, { method:"POST", headers, body:JSON.stringify({ action:"activate", id:codex.id }) }), activated = await activate.json();
     assert.equal(activate.status, 200, JSON.stringify(activated));
@@ -510,7 +600,87 @@ test("canvas shares ten persistent API and CLI connections without a server-wide
     assert.equal(Object.hasOwn(stored, "activeId"), false);
     const deleteDefault = await fetch(`${origin}/api/settings/connections`, { method:"POST", headers, body:JSON.stringify({ action:"delete", id:"default" }) });
     assert.equal(deleteDefault.status, 400);
+    const editDefault = await fetch(`${origin}/api/settings/connections`, { method:"POST", headers, body:JSON.stringify({ action:"save", id:"default", connection:{ provider:"api", apiFormat:"openai", apiUrl:"https://changed.example.test/v1", apiModel:"changed", apiKey:"changed", effort:"medium" } }) }), editDefaultBody = await editDefault.json();
+    assert.equal(editDefault.status, 200, JSON.stringify(editDefaultBody));
+    assert.equal(editDefaultBody.savedId, "default");
   } finally { await stopServer(child); }
+});
+
+test("connection manager CLI inspection returns the platform install fallback without running a model request", { timeout:10000 }, async () => {
+  const env = apiServerEnv("https://api.example.test", { PATH:"", KIMI_CLI_PATH:"kimi" });
+  env.HOME = path.join(env.PENECHO_STATE_DIR, "home");
+  env.USERPROFILE = env.HOME;
+  const { child, origin } = await startServer(env), headers = { Origin:origin, "Content-Type":"application/json" };
+  try {
+    const response = await fetch(`${origin}/api/settings/connections/inspect-cli`, { method:"POST", headers, body:JSON.stringify({ provider:"kimi-cli" }) }), body = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(body));
+    assert.equal(body.status.state, "missing");
+    assert.equal(body.status.executable, "");
+    assert.equal(body.status.loginCommand, "kimi login");
+    assert.match(body.status.installCommand, /code\.kimi\.com\/kimi-code\/install\.(?:sh|ps1)/);
+
+    const invalid = await fetch(`${origin}/api/settings/connections/inspect-cli`, { method:"POST", headers, body:JSON.stringify({ provider:"api" }) });
+    assert.equal(invalid.status, 400);
+  } finally { await stopServer(child); }
+});
+
+test("connection model discovery validates requests and safely lists provider models", { timeout:10000 }, async () => {
+  const provider = await startModelDiscoveryServer(), { child, origin, stateDir } = await startServer(apiServerEnv(provider.origin)), headers = { Origin:origin, "Content-Type":"application/json" };
+  try {
+    const create = await fetch(`${origin}/api/settings/connections`, { method:"POST", headers, body:JSON.stringify({ action:"save", connection:{ provider:"api", apiFormat:"anthropic", apiUrl:`${provider.origin}/anthropic/v1/messages`, apiModel:"manual-model", apiKey:"anthropic-saved-key", effort:"medium" } }) }), created = await create.json();
+    assert.equal(create.status, 200, JSON.stringify(created));
+    const connection = created.connections.find(item => item.apiFormat === "anthropic"), storedAfterCreate = await fs.promises.readFile(path.join(stateDir, "connections.json"), "utf8");
+
+    const openai = await fetch(`${origin}/api/settings/connections/models`, { method:"POST", headers, body:JSON.stringify({ connection:{ provider:"api", apiFormat:"openai", apiUrl:`${provider.origin}/openai/v1`, apiModel:"", apiKey:"openai-key", effort:"medium" } }) }), openaiBody = await openai.json();
+    assert.equal(openai.status, 200, JSON.stringify(openaiBody));
+    assert.deepEqual(openaiBody.models, ["alpha-model", "gamma-model", "zeta-model"]);
+
+    const anthropic = await fetch(`${origin}/api/settings/connections/models`, { method:"POST", headers, body:JSON.stringify({ id:connection.id, connection:{ provider:"api", apiFormat:"anthropic", apiUrl:`${provider.origin}/anthropic/v1/messages`, apiModel:"manual-model", apiKey:"", effort:"medium" } }) }), anthropicBody = await anthropic.json();
+    assert.equal(anthropic.status, 200, JSON.stringify(anthropicBody));
+    assert.deepEqual(anthropicBody.models, ["claude-3-model", "claude-4-model"]);
+    assert.equal(Object.hasOwn(anthropicBody, "apiKey"), false);
+    assert.doesNotMatch(JSON.stringify(anthropicBody), /anthropic-saved-key/);
+    assert.deepEqual(provider.requests.map(request => request.path), ["/openai/v1/models", "/anthropic/v1/models"]);
+    assert.equal(provider.requests[0].method, "GET");
+    assert.equal(provider.requests[0].accept, "application/json");
+    assert.equal(provider.requests[0].authorization, "Bearer openai-key");
+    assert.equal(provider.requests[0].xApiKey, "");
+    assert.equal(provider.requests[1].accept, "application/json");
+    assert.equal(provider.requests[1].authorization, "");
+    assert.equal(provider.requests[1].xApiKey, "anthropic-saved-key");
+    assert.equal(provider.requests[1].anthropicVersion, "2023-06-01");
+
+    const upstreamError = await fetch(`${origin}/api/settings/connections/models`, { method:"POST", headers, body:JSON.stringify({ connection:{ provider:"api", apiFormat:"openai", apiUrl:`${provider.origin}/error/v1`, apiKey:"bad-key", effort:"medium" } }) }), upstreamErrorBody = await upstreamError.json();
+    assert.equal(upstreamError.status, 502);
+    assert.match(upstreamErrorBody.error, /HTTP 401/);
+    assert.doesNotMatch(upstreamErrorBody.error, /provider-secret-error-body/);
+    const malformed = await fetch(`${origin}/api/settings/connections/models`, { method:"POST", headers, body:JSON.stringify({ connection:{ provider:"api", apiFormat:"openai", apiUrl:`${provider.origin}/malformed/v1`, apiKey:"valid-key", effort:"medium" } }) });
+    assert.equal(malformed.status, 502);
+    assert.equal((await malformed.json()).error, "Provider returned an invalid model list.");
+    const wrongType = await fetch(`${origin}/api/settings/connections/models`, { method:"POST", headers, body:JSON.stringify({ connection:{ provider:"api", apiFormat:"openai", apiUrl:`${provider.origin}/plain/v1`, apiKey:"valid-key", effort:"medium" } }) });
+    assert.equal(wrongType.status, 502);
+    assert.equal((await wrongType.json()).error, "Provider returned a non-JSON model list.");
+
+    const requestCount = provider.requests.length;
+    for (const [label, body] of [
+      ["provider", { connection:{ provider:"codex-cli", effort:"medium" } }],
+      ["url", { connection:{ provider:"api", apiFormat:"openai", apiUrl:"file:///tmp/models", apiKey:"key", effort:"medium" } }],
+      ["key", { connection:{ provider:"api", apiFormat:"openai", apiUrl:`${provider.origin}/openai/v1`, apiKey:"key\n", effort:"medium" } }],
+      ["id", { id:"missing-connection", connection:{ provider:"api", apiFormat:"openai", apiUrl:`${provider.origin}/openai/v1`, apiKey:"key", effort:"medium" } }],
+    ]) {
+      const response = await fetch(`${origin}/api/settings/connections/models`, { method:"POST", headers, body:JSON.stringify(body) }), parsed = await response.json();
+      assert.equal(response.status, 400, `${label}: ${JSON.stringify(parsed)}`);
+    }
+    assert.equal(provider.requests.length, requestCount);
+    assert.equal((await fetch(`${origin}/api/settings/connections/models`, { method:"POST", headers:{ Origin:"https://evil.example", "Content-Type":"application/json" }, body:"{}" })).status, 403);
+    assert.equal((await fetch(`${origin}/api/settings/connections/models`, { method:"POST", headers:{ "Content-Type":"application/json" }, body:"{}" })).status, 403);
+    assert.equal((await fetch(`${origin}/api/settings/connections/models`, { method:"POST", headers:{ Origin:origin }, body:"{}" })).status, 415);
+    assert.equal((await fetch(`${origin}/api/settings/connections/models`, { headers })).status, 405);
+    assert.equal(await fs.promises.readFile(path.join(stateDir, "connections.json"), "utf8"), storedAfterCreate);
+  } finally {
+    await stopServer(child);
+    await new Promise(resolve => provider.server.close(resolve));
+  }
 });
 
 test("two clients independently route requests through the shared connection list", { timeout:10000 }, async () => {
@@ -750,7 +920,7 @@ test("Claude CLI mode sends the canvas to the authenticated local CLI with the s
 
 test("Kimi CLI mode uses the documented prompt stream, no-tools agent, and temporary canvas reference", { timeout:20000 }, async () => {
   const directory=await fs.promises.mkdtemp(path.join(os.tmpdir(),"penecho-server-kimi-")),fakeCli=path.join(directory,"fake-kimi.js"),record=path.join(directory,"record.json");
-  await fs.promises.writeFile(fakeCli, `"use strict";const fs=require("node:fs"),path=require("node:path"),args=process.argv.slice(2),prompt=args[args.indexOf("--prompt")+1]||"",agentFile=args[args.indexOf("--agent-file")+1],image=/@(canvas\\.(?:png|webp))/.exec(prompt)?.[1];fs.writeFileSync(${JSON.stringify(record)},JSON.stringify({args,imageExists:Boolean(image&&fs.existsSync(path.join(process.cwd(),image))),agent:fs.readFileSync(agentFile,"utf8")}));process.stdout.write(JSON.stringify({type:"message",role:"assistant",content:[{type:"text",text:'{"intent":"answer","observedText":"hi","message":"hello","commands":[]}'}]})+"\\n");\n`);
+  await fs.promises.writeFile(fakeCli, `"use strict";const fs=require("node:fs"),path=require("node:path"),args=process.argv.slice(2),prompt=args[args.indexOf("--prompt")+1]||"",agentFile=args[args.indexOf("--agent-file")+1],image=/@(canvas-[0-9]+[.](?:png|webp))/.exec(prompt)?.[1];fs.writeFileSync(${JSON.stringify(record)},JSON.stringify({args,imageExists:Boolean(image&&fs.existsSync(path.join(process.cwd(),image))),agent:fs.readFileSync(agentFile,"utf8")}));process.stdout.write(JSON.stringify({type:"message",role:"assistant",content:[{type:"text",text:'{"intent":"answer","observedText":"hi","message":"hello","commands":[]}'}]})+"\\n");\n`);
   const {child,origin}=await startServer(serverEnv({AI_PROVIDER:"kimi-cli",KIMI_CLI_PATH:fakeCli,KIMI_CLI_MODEL:"kimi-code/k3",AI_EFFORT:"medium"}));
   try {
     const page=await fetch(origin),cookie=page.headers.get("set-cookie")?.split(";",1)[0],response=await fetch(`${origin}/api/ai/command`,{method:"POST",headers:{"Content-Type":"application/json",Origin:origin,Cookie:cookie},body:JSON.stringify(validPayload())}),body=await response.json(),saved=JSON.parse(await fs.promises.readFile(record,"utf8"));
@@ -761,7 +931,7 @@ test("Kimi CLI mode uses the documented prompt stream, no-tools agent, and tempo
     assert.ok(saved.args.includes("--agent-file"));
     assert.match(saved.agent,/tools: \[\]/);
     assert.match(saved.agent,/subagents: \[\]/);
-    assert.match(saved.agent,/Use only content supplied in the prompt, including virtual-file read views/);
+    assert.match(saved.agent,/Use only supplied content and images[\s\S]*Even if Kimi advertises built-in tools, never invoke them[\s\S]*If the prompt contains HARNESS REQUEST\.availableTools/);
     assert.doesNotMatch(saved.agent,/must not attempt to read files/);
     assert.equal(saved.args[saved.args.indexOf("--model")+1],"kimi-code/k3");
   } finally {
@@ -783,7 +953,7 @@ test("Codex CLI mode writes the configured WebP image with a .webp extension", {
     assert.equal(saved.extension,".webp");
     assert.equal(saved.signature,"RIFF");
     assert.equal(saved.json,true);
-    assert.ok(saved.args.includes('model_reasoning_effort="xhigh"'));
+    assert.ok(saved.args.includes('model_reasoning_effort="max"'));
     const configuredPayload=validPayload(),configuredResponse=await fetch(`${origin}/api/ai/command`,{method:"POST",headers:{"Content-Type":"application/json",Origin:origin,Cookie:cookie},body:JSON.stringify(configuredPayload)});
     assert.equal(configuredResponse.status,200);
     const configured=JSON.parse(await fs.promises.readFile(record,"utf8"));
@@ -822,7 +992,7 @@ test("page reasoning effort maps to OpenAI and Anthropic request fields", { time
     const maxResponse=await fetch(`${openaiServer.origin}/api/ai/command`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(maxPayload)});
     assert.equal(maxResponse.status,200);
     const maxRequest=JSON.parse(openai.requests[1]);
-    assert.equal(maxRequest.reasoning_effort,"xhigh");
+    assert.equal(maxRequest.reasoning_effort,"max");
     assert.equal(Object.hasOwn(maxRequest,"temperature"),false);
   } finally { await stopServer(openaiServer.child); await new Promise(resolve=>openai.server.close(resolve)); }
 
@@ -833,12 +1003,12 @@ test("page reasoning effort maps to OpenAI and Anthropic request fields", { time
     assert.equal(Object.hasOwn(JSON.parse(kimi.requests[0]),"temperature"),false);
   } finally { await stopServer(kimiServer.child); await new Promise(resolve=>kimi.server.close(resolve)); }
 
-  const configuredOpenai=await startApiServer(),configuredOpenaiServer=await startServer(apiServerEnv(configuredOpenai.origin,{AI_EFFORT:"future-tier"}));
+  const configuredOpenai=await startApiServer(),customEffort="Provider_Native",configuredOpenaiServer=await startServer(apiServerEnv(configuredOpenai.origin,{AI_EFFORT:customEffort}));
   try {
     const response=await fetch(`${configuredOpenaiServer.origin}/api/ai/command`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(validPayload())});
     assert.equal(response.status,200);
     const configuredRequest=JSON.parse(configuredOpenai.requests[0]);
-    assert.equal(configuredRequest.reasoning_effort,"future-tier");
+    assert.equal(configuredRequest.reasoning_effort,customEffort);
     assert.equal(Object.hasOwn(configuredRequest,"temperature"),false);
   } finally { await stopServer(configuredOpenaiServer.child); await new Promise(resolve=>configuredOpenai.server.close(resolve)); }
 
@@ -1286,8 +1456,9 @@ test("enabled plugin documents reach the model and gate html_widget commands", {
     assert.match(modelInput.widgetRenderingPolicy, /reflowing, regrouping, shortening secondary copy, or choosing a more appropriate widget size/);
     assert.match(modelInput.widgetRenderingPolicy, /verify the longest labels and every section at the actual widget dimensions/);
     assert.match(modelInput.widgetRenderingPolicy, /For SVG, size text relative to its viewBox, not browser defaults/);
+    assert.match(modelInput.widgetRenderingPolicy, /Match the current uiTheme and nearby Canvas visual language/);
     assert.doesNotMatch(modelInput.widgetRenderingPolicy, /180-240px|at least 100px|at least 80px/);
-    assert.match(modelInput.widgetRenderingPolicy, /visualization backdrop transparent by default[\s\S]*opaque backdrop only when visually necessary or explicitly requested/);
+    assert.match(modelInput.widgetRenderingPolicy, /visualization backdrop transparent by default[\s\S]*smallest necessary opaque or translucent backing[\s\S]*materially improves contrast, legibility, semantic grouping, or media presentation/);
     assert.match(modelInput.widgetRenderingPolicy, /no outer background, border, corner radius, or box shadow/);
 
     const disabledResponse = await fetch(`${origin}/api/ai/command`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(validPayload()) }),
@@ -1966,6 +2137,14 @@ test("widget host CSP permits on-demand HTTPS resources inside the isolated widg
     assert.equal(renderer.headers.get("cross-origin-resource-policy"), "cross-origin");
     assert.equal(renderer.headers.get("access-control-allow-origin"), "*");
     assert.match(await renderer.text(), /html2canvas/);
+    const visualVendor=await fetch(`${origin}/visual-explainer-vendor.js`),visualRuntime=await fetch(`${origin}/visual-explainer-runtime.js`);
+    assert.equal(visualVendor.status,200);
+    assert.match(visualVendor.headers.get("content-type"),/^application\/javascript/);
+    assert.equal(visualVendor.headers.get("cross-origin-resource-policy"),"cross-origin");
+    assert.match(await visualVendor.text(),/AntVInfographic/);
+    assert.equal(visualRuntime.status,200);
+    assert.equal(visualRuntime.headers.get("cross-origin-resource-policy"),"cross-origin");
+    assert.match(await visualRuntime.text(),/penecho-visual-explainer-diagnostics/);
 
     const privateData = await fetch(`${origin}/api/widget-fetch?url=${encodeURIComponent("https://127.0.0.1/")}`, { headers:{ Origin:origin } });
     assert.equal(privateData.status, 403);
@@ -2023,7 +2202,9 @@ test("local plugin discovery is constrained and widget prompting is conditional"
   assert.match(source, /Width-only or height-only resizing changes the layout viewport[\s\S]*?SVG or professional-graphic bounds tight on every side with only slight padding/);
   assert.match(source, /Public HTTPS reference links are allowed[\s\S]*?target="_blank"[\s\S]*?noopener noreferrer[\s\S]*?never navigate the widget itself/);
   assert.match(source, /const PLUGIN_ROUTING_PROMPT = `General HTML is mandatory and always enabled/);
-  assert.match(source, /Use native draw only[\s\S]*?10 or fewer basic primitives or line segments[\s\S]*?larger static visuals[\s\S]*?General HTML/);
+  assert.match(source, /Choose exactly one command path by the defining deliverable[\s\S]*never return speculative alternatives/);
+  assert.match(source, /does not expose the PenEcho Agent Visual Explainer tool[\s\S]*General HTML as its explicit compatibility fallback/);
+  assert.match(source, /custom behavior is primary[\s\S]*faithful quantitative chart with axes and scales[\s\S]*diagram, chart, architecture, model, structure, process, flow, or draw do not by themselves justify one/);
   assert.match(source, /filterCapabilityCommands[\s\S]*?command\?\.tool !== "animate_scene"/);
   assert.match(source, /current or changing public information such as news[\s\S]*?network-backed html_widget[\s\S]*?refreshSeconds interval[\s\S]*?update frequency and rate limits/);
   assert.match(source, /if \(pluginsEnabled\) sections\.push\(PLUGIN_ROUTING_PROMPT, PLUGIN_SYSTEM_PROMPT\)/);

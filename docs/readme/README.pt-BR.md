@@ -50,7 +50,7 @@ O PenEcho é membro oficial do **Kimi Open Source Friends**, programa da [Moonsh
 
 [Baixar no GitHub Releases](https://github.com/penecho/penecho/releases/latest).
 
-Para instalar pelo npm, você precisa do [Node.js 20.3 ou mais recente](https://nodejs.org/) e de uma destas opções: uma chave de API, ou [Kimi Code CLI](https://github.com/MoonshotAI/kimi-code), [Codex CLI](https://developers.openai.com/codex/cli) ou [Claude Code CLI](https://code.claude.com/docs/en/overview) autenticado.
+Para instalar pelo npm, você precisa do [Node.js 22.19 ou mais recente](https://nodejs.org/) e de uma destas opções: uma chave de API, ou [Kimi Code CLI](https://github.com/MoonshotAI/kimi-code), [Codex CLI](https://developers.openai.com/codex/cli) ou [Claude Code CLI](https://code.claude.com/docs/en/overview) autenticado.
 
 ```bash
 npm install -g penecho
@@ -73,6 +73,8 @@ npm start
 
 Escreva uma pergunta, equação, diagrama ou ideia incompleta em qualquer lugar da tela e faça uma pausa. O PenEcho interpreta os traços e suas relações espaciais e posiciona a resposta ao lado deles.
 
+- **PenEcho Agent: das fontes ao resultado visual.** Adicione pastas e arquivos somente leitura — PDF, Word, PowerPoint, Excel, imagens ou código —, combine-os com pesquisa na Web e a tela atual e deixe o mesmo agente continuar pela análise, planejamento, criação e revisão.
+- **Produtividade com o Visual Explorer.** Transforme informações densas em um espaço visual responsivo e editável, com visão geral clara, detalhes conectados e evidências. Isso encurta o caminho da pesquisa ao resultado compartilhável e reduz copiar e colar, trocar de ferramenta, desenhar diagramas manualmente e refazer trabalho.
 - Desenhe naturalmente com caneta ou mouse e navegue por uma tela de `20.000 x 20.000`.
 - Receba respostas, dicas, explicações, fórmulas, gráficos e diagramas diretamente na tela.
 - Mova e redimensione rascunhos da IA; aceite ou descarte cada um antes de incorporá-lo ao trabalho.
@@ -88,15 +90,17 @@ O [PenEcho Cloud](https://penecho.ai), lançado na versão 1.0.0, é totalmente 
 
 O **Echoes** permite explorar, favoritar e reutilizar telas e widgets públicos em doze categorias. Você pode publicar seus próprios Crafts, abri-los em um visualizador Web somente leitura e preservar a linhagem entre versões.
 
-## Novidades da versão 1.0.0
+## Novidades da versão 1.1.0
 
-- **PenEcho Cloud.** Projetos privados entre dispositivos, favoritos sincronizados e gerenciamento de conta, armazenamento e créditos.
-- **Dispositivo vinculado.** Emparelhe este host com uma chave de uso único e acesse-o em navegadores e aplicativos autenticados; o vínculo pode ser pausado, retomado ou removido.
-- **Echoes e Crafts públicos.** Explore, compartilhe e reutilize telas e widgets públicos com categorias, favoritos e visualizador Web somente leitura.
-- **Salvamento seguro entre dispositivos.** Cada salvamento cria uma revisão imutável; alterações de outro dispositivo nunca são sobrescritas silenciosamente.
+- **PenEcho Agent.** Trabalhe com arquivos locais, projetos de pastas somente leitura, pesquisa na Web, contexto da tela, criação visual e edição direta em um único fluxo de várias etapas.
+- **Visual Explorer.** Transforme pesquisas, documentos, notas e planos em um resultado visual responsivo que conecta visão geral, detalhes e evidências.
+- **Menos troca de contexto e retrabalho.** Pesquise, analise, estruture, visualize, revise e refine no mesmo espaço; o resultado continua editável na tela.
+- **Entrega visual progressiva.** Receba versões completas do Visual Explorer mais cedo e refine-as no próprio local, sem gerar tudo novamente do zero.
+- **Mais contexto de trabalho.** Adicione PDF, Word, PowerPoint, Excel, imagens, código ou pastas somente leitura; referencie Widgets e escrita existentes e use pesquisa na Internet quando disponível.
 
 ## Destaques anteriores
 
+- **1.0.0.** Introduziu PenEcho Cloud, projetos privados versionados, dispositivos vinculados, Echoes, Crafts públicos e favoritos sincronizados.
 - **0.9.0.** Adicionou várias conexões de IA, telas compartilhadas por projeto, Refine guiado no próprio widget, alterações incrementais com unified diff, streaming SSE e progresso com cancelamento.
 - **0.8.1.** Adicionou dados públicos ao vivo ao General HTML e SVG como padrão para animações e gráficos complexos.
 - **0.8.0 e 0.7.2.** Adicionaram diagramas profissionais editáveis, armazenamento no servidor, fluxos da área de transferência, fotos Web com fonte e edição e exportação mais confiáveis.
