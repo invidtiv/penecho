@@ -43,7 +43,8 @@ import {
 const require = createRequire(import.meta.url)
 const { prepareIsolatedRuntime, resolveCodexLaunch } = require('../../providers/codex-cli.js')
 const { canonicalFile, cliCandidates, managedCliPaths } = require('../../providers/cli-discovery.js')
-const { installCli, runProcess } = require('../../providers/cli-installer.js')
+const { DEFAULT_CANVAS_AGENT_TURN_LIMIT, configuredCanvasAgentTurnLimit } = require('./turn-limit.js')
+const { CODEX_CLI_PINNED_VERSION, assertCodexCliBundle, assertCodexCliVersion, installCli, runProcess } = require('../../providers/cli-installer.js')
 const { fetchPublicResource } = require('../public-fetch.js')
 
 const MAX_PROTOCOL_BYTES = 48 * 1024 * 1024
@@ -202,25 +203,8 @@ function installedCodexCandidates(connection, env, stateDirectory, platform = pr
     : candidate)
 }
 
-function directCodexCandidate(connection, candidates) {
-  const configuredPath=String(connection?.cliPath || 'codex').trim() || 'codex', explicit=candidates.find(candidate=>candidate.source==='configured')
-  if (explicit) return explicit
-  if (!configuredPath.includes('/')&&!configuredPath.includes('\\')) return candidates.find(candidate=>candidate.source==='system') || null
-  return null
-}
-
-function codexVersionParts(value) {
-  const match=/(?:^|\s|v)(\d+)\.(\d+)\.(\d+)(?:[-+\s]|$)/i.exec(String(value||''))
-  return match ? match.slice(1,4).map(Number) : [0,0,0]
-}
-
-function compareCodexVersions(left, right) {
-  const a=codexVersionParts(left),b=codexVersionParts(right)
-  for(let index=0;index<a.length;index+=1)if(a[index]!==b[index])return b[index]-a[index]
-  return 0
-}
-
-async function inspectCodexCandidateVersion(candidate, env, cwd) {
+async function inspectCodexCandidateVersion(candidate, env, cwd, platform = process.platform) {
+  assertCodexCliBundle(candidate.executable,platform)
   const launch=resolveCodexLaunch(candidate.executable,env),result=await runProcess(launch.command,[...launch.prefixArgs,'--version'],{
     cwd,
     env,
@@ -229,21 +213,15 @@ async function inspectCodexCandidateVersion(candidate, env, cwd) {
   return String(result.output||result.diagnostic||'').slice(0,200)
 }
 
-async function orderedCodexFallbacks(candidates, direct, inspectVersion) {
-  const directCanonical=direct?canonicalFile(direct.executable):'',seen=new Set(),external=[],managed=[]
+function systemCodexFallbacks(candidates, preferred) {
+  const preferredCanonical=preferred?canonicalFile(preferred.executable):'',seen=new Set(),fallbacks=[]
   for(const candidate of candidates){
     const canonical=canonicalFile(candidate.executable)
-    if(canonical===directCanonical||seen.has(canonical))continue
+    if(candidate.privateManaged||canonical===preferredCanonical||seen.has(canonical))continue
     seen.add(canonical)
-    if(candidate.privateManaged)managed.push(candidate)
-    else external.push(candidate)
+    fallbacks.push(candidate)
   }
-  const inspected=await Promise.all(external.map(async(candidate,index)=>{
-    try{return{candidate,index,version:await inspectVersion(candidate)}}
-    catch{return{candidate,index,version:''}}
-  }))
-  inspected.sort((left,right)=>compareCodexVersions(left.version,right.version)||left.index-right.index)
-  return [...inspected.map(item=>({...item.candidate,detectedVersion:item.version})),...managed]
+  return fallbacks
 }
 
 function codexCandidateFailure(failures) {
@@ -601,6 +579,7 @@ export class CodexNativeHost {
     resolveWidgetCapabilities = () => ({ professionalEnabled:false, privatePlugins:[] }),
     resolveProject = async () => null,
     modelTimeoutMs = () => DEFAULT_CANVAS_AGENT_IDLE_TIMEOUT_MS,
+    canvasAgentTurnLimit = () => DEFAULT_CANVAS_AGENT_TURN_LIMIT,
     logger = () => {},
     conversationLogger = null,
     conversationTrace = null,
@@ -620,6 +599,7 @@ export class CodexNativeHost {
     this.resolveWidgetCapabilities = resolveWidgetCapabilities
     this.resolveProject = resolveProject
     this.modelTimeoutMs = modelTimeoutMs
+    this.canvasAgentTurnLimit = canvasAgentTurnLimit
     this.logger = logger
     this.conversationLogger = typeof conversationLogger === 'function' ? conversationLogger : null
     this.conversationTrace = typeof conversationTrace === 'function' ? conversationTrace : null
@@ -629,17 +609,15 @@ export class CodexNativeHost {
     this.publicFetch = publicFetch
     this.createAppServer = createAppServer || (options => new CodexNativeAppServerProcess(options))
     this.resolveCliCandidates = resolveCliCandidates || (connection => installedCodexCandidates(connection,this.env,this.stateDirectory,this.platform))
-    this.inspectCliCandidate = inspectCliCandidate || (candidate => inspectCodexCandidateVersion(candidate,this.env,this.stateDirectory))
-    this.installManagedCli = installManagedCli || (() => installCli('codex-cli',{
+    this.inspectCliCandidate = inspectCliCandidate || (candidate => inspectCodexCandidateVersion(candidate,this.env,this.stateDirectory,this.platform))
+    this.installManagedCli = installManagedCli || (codexVersion => installCli('codex-cli',{
       platform:this.platform,
       home:this.env.USERPROFILE||this.env.HOME||homedir(),
       stateDir:this.stateDirectory,
       env:this.env,
+      codexVersion,
     }))
-    this.managedCliInstallAttempted = false
-    this.managedCliInstallPromise = null
-    this.managedCliInstallResult = null
-    this.managedCliInstallError = null
+    this.managedCliInstalls = new Map()
     this.preferredCliExecutables = readCodexCliResolutions(this.stateDirectory)
     this.sessionTtlMs = Math.max(1_000, Number(sessionTtlMs) || SESSION_TTL_MS)
     this.sessions = new Map()
@@ -654,13 +632,13 @@ export class CodexNativeHost {
 
   async connect(options) {
     const {
-      canvasSessionId = '', resumeToken = '', clientId = '', connectionId = 'default', webSearchEnabled = false,
+      canvasSessionId = '', resumeToken = '', clientId = '', connectionId = 'default', conversationId = '', webSearchEnabled = false,
       widgetCapabilities = {}, projectId = '', accessMode = 'controlled', binding = null, send = null, initialBacklog = [], continuity = '',
     } = options || {}
-    if (String(canvasSessionId).length > 256 || String(resumeToken).length > 256 || String(clientId).length > 256 || String(connectionId).length > 256 || String(projectId).length > 128) {
+    if (String(canvasSessionId).length > 256 || String(resumeToken).length > 256 || String(clientId).length > 256 || String(connectionId).length > 256 || String(conversationId).length > 256 || /[\r\n\0]/.test(String(conversationId || '')) || String(projectId).length > 128) {
       throw new Error('PenEcho Agent connection identity is invalid.')
     }
-    const normalizedProjectId = String(projectId || ''), normalizedAccessMode = String(accessMode || 'controlled')
+    const normalizedProjectId = String(projectId || ''), normalizedAccessMode = String(accessMode || 'controlled'), logicalConversationId=String(conversationId || '')
     if (!['controlled', 'full'].includes(normalizedAccessMode)) throw new Error('PenEcho Agent project access mode is invalid.')
     const project = normalizedProjectId ? await this.resolveProject(normalizedProjectId) : null
     if (normalizedProjectId && !project) throw new Error('The selected local project was not found on this PenEcho host.')
@@ -678,7 +656,8 @@ export class CodexNativeHost {
       : null
     const resumeHash = resumeToken ? hash(resumeToken) : ''
     let session = canvasSessionId ? this.sessions.get(String(canvasSessionId)) : null
-    if (session && session.connectionId === String(connection.id || connectionId) && session.connectionFingerprint === fingerprint
+    const resumablePrevious=session&&resumeHash&&session.resumeHash===resumeHash&&this.resumeIndex.get(resumeHash)===session.id?session:null
+    if (session && (!logicalConversationId || session.logicalConversationId === logicalConversationId) && session.connectionId === String(connection.id || connectionId) && session.connectionFingerprint === fingerprint
       && session.webSearchKeyHash === webSearchKeyHash && session.webSearch.enabled === Boolean(webSearchEnabled)
       && session.widgetCapabilities.fingerprint === normalizedWidgetCapabilities.fingerprint
       && session.project?.id === project?.id && session.accessMode === 'controlled' && session.resumeHash === resumeHash
@@ -694,6 +673,7 @@ export class CodexNativeHost {
       this.send(session, 'ready', {
         resumeToken,
         connectionId:session.connectionId,
+        conversationId:session.logicalConversationId,
         harnessSessionId:session.threadId || '',
         webSearchConfigured:true,
         webSearchEnabled:session.webSearch.enabled,
@@ -708,7 +688,6 @@ export class CodexNativeHost {
       this.send(session, 'agent_status', { status:session.active ? 'running' : 'idle' })
       return session
     }
-    if (session) await this.disposeSession(session)
     session = null
 
     const sessionId = randomUUID(), projectRuntimeDirectory = await createProjectRuntimeDirectory(this.stateDirectory, sessionId)
@@ -734,6 +713,7 @@ export class CodexNativeHost {
       connected:true,
       backlog:Array.isArray(initialBacklog) ? initialBacklog.slice(-MAX_BACKLOG) : [],
       pending:new Map(),
+      ignoredToolResultIds:new Set(),
       toolAborts:new Map(),
       toolQueue:Promise.resolve(),
       decisionFeedbackCalls:new Map(),
@@ -747,6 +727,7 @@ export class CodexNativeHost {
       canvasLayoutReviewRequired:false,
       lastCanvasMutationRevision:null,
       canvasTurnBudget:freshCanvasAgentTurnBudget(),
+      canvasAgentTurnLimit:configuredCanvasAgentTurnLimit(this.canvasAgentTurnLimit()),
       visualExplainerBudget:freshVisualExplainerBudget(),
       visualExplorerBudget:freshVisualExplorerBudget(),
       visualSkillsLoaded:new Set(),
@@ -756,6 +737,7 @@ export class CodexNativeHost {
       stateDigest:null,
       emitPublicEvent:null,
       expiryTimer:null,
+      logicalConversationId:logicalConversationId||randomUUID(),
       conversationLogId:randomUUID(),
       requestTraceConnection:{ ...requestTraceConnection(connection, configured(connection.cliModel)), executable:'codex' },
       traceAsset:null,
@@ -811,6 +793,7 @@ export class CodexNativeHost {
     this.send(session, 'ready', {
       resumeToken:nextResumeToken,
       connectionId:session.connectionId,
+      conversationId:session.logicalConversationId,
       harnessSessionId:session.threadId || '',
       webSearchConfigured:true,
       webSearchEnabled:session.webSearch.enabled,
@@ -823,6 +806,7 @@ export class CodexNativeHost {
       backlog:[],
     })
     this.send(session, 'agent_status', { status:'idle' })
+    if(resumablePrevious)await this.disposeSession(resumablePrevious).catch(() => {})
     return session
   }
 
@@ -899,21 +883,36 @@ export class CodexNativeHost {
     }
   }
 
-  ensureManagedCliInstalled() {
-    if (!this.managedCliInstallAttempted) {
-      this.managedCliInstallAttempted=true
-      this.managedCliInstallPromise=Promise.resolve().then(()=>this.installManagedCli()).then(result=>{
+  async compatibleCandidate(session, connection, candidate, failures) {
+    const executable=String(candidate?.executable||'').trim(),source=String(candidate?.source||'configured').slice(0,32)
+    if(!executable)return null
+    try{
+      const version=String(candidate.detectedVersion||await this.inspectCliCandidate(candidate)).slice(0,200)
+      return{...candidate,detectedVersion:version}
+    }catch(error){
+      this.forgetPreferredCli(connection,executable)
+      failures.push({source,error})
+      this.logger({type:'codex-native-cli-candidate-rejected',source,error:safeError(error)})
+      session.traceDecisionProtocol?.({kind:'native-cli-candidate-rejected',source,error:safeError(error)})
+      return null
+    }
+  }
+
+  ensureManagedCliInstalled(codexVersion = CODEX_CLI_PINNED_VERSION) {
+    const requestedVersion=String(codexVersion||CODEX_CLI_PINNED_VERSION)
+    if (!this.managedCliInstalls.has(requestedVersion)) {
+      const promise=Promise.resolve().then(()=>this.installManagedCli(requestedVersion)).then(result=>{
         const executable=String(result?.executable||'').trim()
         if(!executable)throw new Error('PenEcho managed Codex CLI installation did not return an executable.')
-        this.managedCliInstallResult={...result,executable}
-        return this.managedCliInstallResult
+        assertCodexCliVersion(result?.version,requestedVersion)
+        return{...result,executable}
       },error=>{
-        this.managedCliInstallError=error instanceof Error?error:new Error(safeError(error))
-        throw this.managedCliInstallError
+        throw error instanceof Error?error:new Error(safeError(error))
       })
-      this.managedCliInstallPromise.catch(()=>{})
+      promise.catch(()=>{})
+      this.managedCliInstalls.set(requestedVersion,promise)
     }
-    return this.managedCliInstallPromise
+    return this.managedCliInstalls.get(requestedVersion)
   }
 
   async ensureStarted(session) {
@@ -936,33 +935,54 @@ export class CodexNativeHost {
       const privateExecutable=managedCliPaths('codex-cli',{env:this.env,platform:this.platform,stateDir:this.stateDirectory})[0],hadPrivateManagedCli=candidates.some(candidate=>candidate?.privateManaged)
         || Boolean(preferredExecutable&&canonicalFile(preferredExecutable)===canonicalFile(privateExecutable))
       if(preferredExecutable&&!preferred)this.forgetPreferredCli(connection)
-      const failures=[],direct=preferred||directCodexCandidate(connection,candidates)
-      if (direct) {
-        const threadId=await this.startCandidate(session,connection,direct,lifecycle,failures)
+      const failures=[]
+      if (preferred) {
+        const compatible=await this.compatibleCandidate(session,connection,preferred,failures)
+        if(compatible){
+          const threadId=await this.startCandidate(session,connection,compatible,lifecycle,failures)
+          if(threadId)return threadId
+        }
+      }
+      this.send(session,'agent_status',{status:'preparing',phase:hadPrivateManagedCli?'repairing':'installing'})
+      session.active?.timeout?.activity()
+      let installed=null
+      try {
+        installed=await this.ensureManagedCliInstalled(CODEX_CLI_PINNED_VERSION)
+        this.logger({type:'codex-native-managed-cli-installed',release:CODEX_CLI_PINNED_VERSION,version:String(installed.version||'').slice(0,64)})
+        session.traceDecisionProtocol?.({kind:'native-managed-cli-installed',release:CODEX_CLI_PINNED_VERSION,version:String(installed.version||'').slice(0,64)})
+      } catch(error) {
+        failures.push({source:'penecho-install-pinned',error})
+        this.logger({type:'codex-native-managed-cli-install-failed',release:CODEX_CLI_PINNED_VERSION,error:safeError(error)})
+        session.traceDecisionProtocol?.({kind:'native-managed-cli-install-failed',release:CODEX_CLI_PINNED_VERSION,error:safeError(error)})
+      }
+      if(installed){
+        const threadId=await this.startCandidate(session,connection,{executable:installed.executable,source:'penecho-installed',privateManaged:true},lifecycle,failures)
         if(threadId)return threadId
       }
       this.send(session,'agent_status',{status:'preparing',phase:'discovering'})
       session.active?.timeout?.activity()
-      const fallbacks=await orderedCodexFallbacks(candidates,direct,candidate=>this.inspectCliCandidate(candidate))
-      for(const candidate of fallbacks){
-        const threadId=await this.startCandidate(session,connection,candidate,lifecycle,failures)
+      for(const candidate of systemCodexFallbacks(candidates,preferred)){
+        const compatible=await this.compatibleCandidate(session,connection,candidate,failures)
+        if(!compatible)continue
+        const threadId=await this.startCandidate(session,connection,compatible,lifecycle,failures)
         if(threadId)return threadId
       }
-      this.send(session,'agent_status',{status:'preparing',phase:hadPrivateManagedCli?'repairing':'installing'})
+      this.send(session,'agent_status',{status:'preparing',phase:'installing'})
       session.active?.timeout?.activity()
-      let installed
-      try {
-        installed=await this.ensureManagedCliInstalled()
-        this.logger({type:'codex-native-managed-cli-installed',version:String(installed.version||'').slice(0,64)})
-        session.traceDecisionProtocol?.({kind:'native-managed-cli-installed',version:String(installed.version||'').slice(0,64)})
-      } catch(error) {
-        failures.push({source:'penecho-install',error})
-        this.logger({type:'codex-native-managed-cli-install-failed',error:safeError(error)})
-        session.traceDecisionProtocol?.({kind:'native-managed-cli-install-failed',error:safeError(error)})
-        throw codexCandidateFailure(failures)
+      let latest=null
+      try{
+        latest=await this.ensureManagedCliInstalled('latest')
+        this.logger({type:'codex-native-managed-cli-installed',release:'latest',version:String(latest.version||'').slice(0,64)})
+        session.traceDecisionProtocol?.({kind:'native-managed-cli-installed',release:'latest',version:String(latest.version||'').slice(0,64)})
+      }catch(error){
+        failures.push({source:'penecho-install-latest',error})
+        this.logger({type:'codex-native-managed-cli-install-failed',release:'latest',error:safeError(error)})
+        session.traceDecisionProtocol?.({kind:'native-managed-cli-install-failed',release:'latest',error:safeError(error)})
       }
-      const threadId=await this.startCandidate(session,connection,{executable:installed.executable,source:'penecho-installed',privateManaged:true},lifecycle,failures)
-      if(threadId)return threadId
+      if(latest){
+        const threadId=await this.startCandidate(session,connection,{executable:latest.executable,source:'penecho-latest',privateManaged:true},lifecycle,failures)
+        if(threadId)return threadId
+      }
       throw codexCandidateFailure(failures)
     })()
     session.startPromise = startPromise
@@ -1016,6 +1036,7 @@ export class CodexNativeHost {
     this.traceConversation(session,'connection-change')
     this.send(session,'ready',{
       connectionId:session.connectionId,
+      conversationId:session.logicalConversationId,
       harnessSessionId:session.threadId || '',
       webSearchConfigured:true,
       webSearchEnabled:session.webSearch.enabled,
@@ -1218,16 +1239,14 @@ export class CodexNativeHost {
         timeoutController,
         Math.max(1_000, Number(this.modelTimeoutMs?.(session.connectionId)) || DEFAULT_CANVAS_AGENT_IDLE_TIMEOUT_MS),
         {
-          reasonFor:(kind, limitMs) => Object.assign(new Error(kind === 'idle'
-            ? `Codex CLI PenEcho Agent turn timed out after ${canvasAgentTimeoutSeconds(limitMs)} seconds without activity.`
-            : `Codex CLI PenEcho Agent turn timed out after reaching the ${canvasAgentTimeoutSeconds(limitMs)}-second total limit.`), { name:'TimeoutError' }),
+          reasonFor:(_kind, limitMs) => Object.assign(new Error(`Codex CLI PenEcho Agent turn timed out after ${canvasAgentTimeoutSeconds(limitMs)} seconds without activity. The conversation is preserved; send another message to continue.`), { name:'TimeoutError' }),
         },
       )
       timeoutController.signal.addEventListener('abort', () => {
         const error = timeoutController.signal.reason instanceof Error
           ? timeoutController.signal.reason
           : new Error('Codex CLI PenEcho Agent turn timed out.')
-        this.failTurn(session, error, { close:true }).catch(() => {})
+        this.interruptFailedTurn(session, error).catch(() => {})
       }, { once:true })
       const imageAttachments = await this.admitUserImages(session, images)
       assertActive()
@@ -1291,10 +1310,12 @@ export class CodexNativeHost {
     }
   }
 
-  async abortToolWork(session, error) {
-    this.rejectNativeToolAdmission(session.active, error)
+  async abortToolWork(session, error, active = session.active) {
+    this.rejectNativeToolAdmission(active, error)
     for (const [requestId, pending] of session.pending) {
       session.pending.delete(requestId)
+      session.ignoredToolResultIds.add(requestId)
+      if (session.ignoredToolResultIds.size > 256) session.ignoredToolResultIds.delete(session.ignoredToolResultIds.values().next().value)
       pending.reject(error)
     }
     for (const [callId, controller] of session.toolAborts) {
@@ -1322,7 +1343,7 @@ export class CodexNativeHost {
     const interruptPromise=session.process.interrupt(session.threadId, active.turnId)
     session.interruptPromise=interruptPromise
     try {
-      await Promise.all([interruptPromise,this.abortToolWork(session, error)])
+      await Promise.all([interruptPromise,this.abortToolWork(session, error, active)])
       this.send(session, 'agent_status', { status:'idle' })
     } catch (interruptError) {
       await this.invalidateSession(session, new Error(`Codex app-server interrupt failed: ${safeError(interruptError)}`))
@@ -1338,6 +1359,29 @@ export class CodexNativeHost {
       await this.invalidateSession(session, failure)
     } else if (active) active.fail(failure)
     this.send(session, 'agent_status', { status:'idle' })
+  }
+
+  async interruptFailedTurn(session, error) {
+    const active = session?.active
+    if (!active) return
+    const failure = new Error(safeError(error))
+    failure.name = error?.name || failure.name
+    if (!active.turnId || !session.process?.alive) {
+      await this.invalidateSession(session, failure)
+      return
+    }
+    const interruptPromise = session.process.interrupt(session.threadId, active.turnId)
+    session.interruptPromise = interruptPromise
+    const toolAbortPromise = this.abortToolWork(session, failure, active)
+    active.fail(failure)
+    try {
+      await Promise.all([interruptPromise, toolAbortPromise])
+      this.send(session, 'agent_status', { status:'idle' })
+    } catch (interruptError) {
+      await this.invalidateSession(session, new Error(`Codex app-server interrupt failed after a recoverable turn error: ${safeError(interruptError)}`))
+    } finally {
+      if (session.interruptPromise === interruptPromise) session.interruptPromise = null
+    }
   }
 
   concludeNativeTurnAfterTool(session, active, value) {
@@ -1798,15 +1842,19 @@ export class CodexNativeHost {
   }
 
   resolveToolResult(session, payload) {
-    const pending = session.pending.get(String(payload?.requestId || ''))
-    if (!pending) throw new Error('Canvas tool result does not match a pending request.')
-    session.pending.delete(String(payload.requestId))
+    const requestId=String(payload?.requestId || ''),pending = session.pending.get(requestId)
+    if (!pending) {
+      if (session.ignoredToolResultIds.delete(requestId)) return false
+      throw new Error('Canvas tool result does not match a pending request.')
+    }
+    session.pending.delete(requestId)
     if (payload.ok === false) {
       const detail = payload.error && typeof payload.error === 'object'
         ? JSON.stringify({ code:payload.error.code || 'CANVAS_TOOL_FAILED', message:payload.error.message || 'Canvas tool failed.', details:payload.error.details || null })
         : boundedText(payload.error || 'Canvas tool failed.', 2_000)
       pending.reject(new Error(boundedText(detail, 2_000)))
     } else pending.resolve(payload.result)
+    return true
   }
 
   async disconnect(session, binding) {
@@ -1844,6 +1892,7 @@ export class CodexNativeHost {
       if(interruption)await interruption
       session.decisionFeedbackCalls.clear()
       session.decisionFeedbackCallIds.clear()
+      session.ignoredToolResultIds.clear()
       this.logConversation(session, 'end')
       this.traceConversation(session, 'end')
       try { await session.process?.close() } catch (error) { this.logger({ type:'codex-native-close-error', error:safeError(error) }) }
