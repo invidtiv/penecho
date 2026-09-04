@@ -50,7 +50,14 @@
       favoriteWidgetsHint:"Add one to this Canvas",
       explore:"Echoes",
       exploreHint:"Browse public Canvases and Widgets.",
+      cloudNavLibrary:"Library",
       cloudAccount:"Cloud account",
+      accountHint:"Manage your identity, Cloud storage, and project activity.",
+      accountOverview:"Account overview",
+      accountProjects:"Projects",
+      accountCanvases:"Canvases",
+      signIn:"Sign in",
+      openAccount:"Open account",
       cloudUser:"PenEcho user",
       credits:"{count} credits",
       refreshAccount:"Refresh account",
@@ -68,11 +75,14 @@
       signedInReady:"Signed in. Your Cloud account is ready.",
       browserExpired:"Browser sign-in expired. Select Sign in with browser to try again.",
       linkThisDevice:"Link device",
+      linkDeviceHint:"Connect this PenEcho host for secure remote Canvas access.",
       linkSignInFirst:"After signing in, enter a one-time pairing key to reach this host securely from Cloud.",
       thisDevice:"This device",
       connected:"Connected",
       deviceLinked:"Device linked",
+      notLinked:"Not linked",
       connecting:"Connecting",
+      connectionFailed:"Connection failed",
       paused:"Paused",
       pauseLink:"Pause link",
       enableLink:"Enable link",
@@ -247,7 +257,14 @@
       favoriteWidgetsHint:"加入当前画布",
       explore:"Echoes",
       exploreHint:"浏览公开画布与组件。",
+      cloudNavLibrary:"内容库",
       cloudAccount:"Cloud 账户",
+      accountHint:"管理账户身份、Cloud 空间与项目活动。",
+      accountOverview:"账户概览",
+      accountProjects:"项目",
+      accountCanvases:"画布",
+      signIn:"登录",
+      openAccount:"前往账户",
       cloudUser:"PenEcho 用户",
       credits:"{count} 积分",
       refreshAccount:"刷新账户",
@@ -265,11 +282,14 @@
       signedInReady:"登录成功，PenEcho Cloud 账户已就绪。",
       browserExpired:"浏览器登录已过期，请重新选择“通过浏览器登录”。",
       linkThisDevice:"连接设备",
+      linkDeviceHint:"连接此 PenEcho 主机，以安全地远程访问画布。",
       linkSignInFirst:"登录后输入一次性配对密钥，即可从 Cloud 安全访问此主机。",
       thisDevice:"此设备",
       connected:"已连接",
       deviceLinked:"设备已连接",
+      notLinked:"未连接",
       connecting:"连接中",
+      connectionFailed:"连接失败",
       paused:"已暂停",
       pauseLink:"暂停连接",
       enableLink:"启用连接",
@@ -434,6 +454,7 @@
     selectedProjectId:null,
     cloudSection:"projects",
     cloudFavoriteKind:"all",
+    accountRequestId:0,
     projectRequestId:0,
     favoriteRequestId:0,
     busy:false,
@@ -547,8 +568,44 @@
       else if (key.startsWith("on") && typeof value === "function") node.addEventListener(key.slice(2), value);
       else if (value !== undefined && value !== null) node.setAttribute(key, String(value));
     }
+    const isPublicationLink = tag === "a" && String(node.className || "").split(/\s+/).includes("cloud-publication-link");
+    if ((tag === "button" || tag === "a") && !node.dataset.peButton && !node.dataset.peHit && !isPublicationLink) {
+      if (node.classList.contains("cloud-dialog-close")) {
+        node.dataset.peButton = "icon";
+        node.dataset.peDensity = "compact";
+      } else if (node.classList.contains("cloud-section-tab")) {
+        // Cloud's master navigation follows the Canvas Library row contract,
+        // not the horizontal tab or outlined-button contracts.
+      } else if (node.classList.contains("cloud-canvas-row")) {
+        node.dataset.peHit = "choice";
+      } else if (node.classList.contains("cloud-favorite-filter")) {
+        node.dataset.peButton = "segment";
+        node.dataset.peDensity = "segment";
+      } else if (node.classList.contains("cloud-button")) {
+        node.dataset.peButton = node.classList.contains("primary") ? "primary" : node.classList.contains("danger") ? "danger" : node.classList.contains("cloud-row-action") ? "ghost" : "secondary";
+        node.dataset.peDensity = node.classList.contains("cloud-row-action") ? "compact" : "standard";
+      } else if (node.getAttribute("role") !== "tab") {
+        node.dataset.peButton = "secondary";
+        node.dataset.peDensity = "compact";
+      }
+    }
     for (const child of Array.isArray(children) ? children : [children]) if (child) node.append(child);
     return node;
+  }
+
+  function lineIcon(paths) {
+    const createSvgNode = (name) => typeof document.createElementNS === "function"
+      ? document.createElementNS("http://www.w3.org/2000/svg", name)
+      : document.createElement(name);
+    const svg = createSvgNode("svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+    for (const data of paths) {
+      const path = createSvgNode("path");
+      path.setAttribute("d", data);
+      svg.append(path);
+    }
+    return svg;
   }
 
   function focusableElements(dialog) {
@@ -557,6 +614,7 @@
   }
 
   let activeCloudOverlay = null;
+  let cloudDialogSequence = 0;
 
   function closeOverlay(overlay) {
     const restoreFocus = overlay?._restoreFocus;
@@ -569,13 +627,32 @@
     if (restoreFocus?.isConnected) restoreFocus.focus({ preventScroll:true });
   }
 
-  function dialogShell({ title, subtitle = "", share = false }) {
+  function dialogShell({ title, subtitle = "", share = false, variant = "" }) {
     const overlay = el("div", { class:"penecho-cloud-overlay" });
     overlay._restoreFocus = document.activeElement;
-    const dialog = el("section", { class:`penecho-cloud-dialog${share ? " share" : ""}`, role:"dialog", "aria-modal":"true", "aria-label":title });
-    const close = el("button", { class:"cloud-dialog-close", type:"button", text:"×", "aria-label":cloudT("close"), onclick:() => closeOverlay(overlay) });
-    const heading = el("div", {}, [el("h2", { text:title }), subtitle ? el("p", { text:subtitle }) : null]);
-    dialog.append(el("header", {}, [heading, close]));
+    const dialogId = ++cloudDialogSequence;
+    const titleId = `penecho-cloud-dialog-title-${dialogId}`;
+    const subtitleId = `penecho-cloud-dialog-subtitle-${dialogId}`;
+    const isCloudCenter = variant === "cloud-center";
+    const dialog = el("section", {
+      class:["penecho-cloud-dialog", share ? "share" : "", variant, isCloudCenter ? "penecho-workbench-dialog" : ""].filter(Boolean).join(" "),
+      role:"dialog",
+      "aria-modal":"true",
+      "aria-labelledby":titleId,
+      ...(subtitle ? { "aria-describedby":subtitleId } : {}),
+    });
+    const close = el("button", { class:"cloud-dialog-close", type:"button", "aria-label":cloudT("close"), onclick:() => closeOverlay(overlay) }, lineIcon(["M6 6l12 12M18 6 6 18"]));
+    const heading = el("div", { class:`cloud-dialog-heading${isCloudCenter ? " penecho-workbench-heading" : ""}` }, [
+      el("h2", { id:titleId, text:title }),
+      subtitle ? el("p", { id:subtitleId, text:subtitle }) : null,
+    ]);
+    const mark = el("span", { class:`cloud-dialog-mark${isCloudCenter ? " penecho-workbench-icon" : ""}`, "aria-hidden":"true", ...(isCloudCenter ? {} : { text:"P" }) });
+    if (isCloudCenter) mark.append(lineIcon(["M7 18.5h10.5a4 4 0 0 0 .4-8A6.2 6.2 0 0 0 6 9.2 4.7 4.7 0 0 0 7 18.5Z"]));
+    const identity = el("div", { class:`cloud-dialog-identity${isCloudCenter ? " penecho-workbench-identity" : ""}` }, [
+      mark,
+      heading,
+    ]);
+    dialog.append(el("header", { class:`cloud-dialog-titlebar${isCloudCenter ? " penecho-workbench-header" : ""}` }, [identity, close]));
     const body = el("div", { class:"penecho-cloud-body" });
     dialog.append(body);
     overlay.append(dialog);
@@ -602,6 +679,18 @@
     return isCloudRuntime()
       ? Boolean(window.PENECHO_REMOTE_CLOUD_STATUS?.accountName)
       : Boolean(state.status?.accountSession?.signedIn);
+  }
+
+  function cloudDeviceConnectionStatus(status = state.status) {
+    const device = status?.device || {};
+    if (!device.configured) return { state:"unconfigured", label:cloudT("notLinked") };
+    if (!device.enabled) return { state:"paused", label:cloudT("paused") };
+    if (device.connected) return { state:"connected", label:cloudT("connected") };
+    const relayState = String(device.state || status?.state || "").toLowerCase();
+    const failed = Boolean(device.lastError || status?.lastError) || ["disconnected", "invalid", "waiting"].includes(relayState);
+    return failed
+      ? { state:"failed", label:cloudT("connectionFailed") }
+      : { state:"connecting", label:cloudT("connecting") };
   }
 
   function updateCloudButton() {
@@ -770,27 +859,93 @@
     state.browserSignIn.timer = setTimeout(poll, BROWSER_SIGN_IN_POLL_MS);
   }
 
-  function accountPanel(render) {
-    const panel = el("section", { class:"penecho-cloud-panel" });
-    panel.append(el("h3", { text:cloudT("cloudAccount") }));
+  function pageHeading(title, description) {
+    return el("header", { class:"cloud-content-heading" }, [
+      el("h3", { text:title }),
+      description ? el("p", { text:description }) : null,
+    ]);
+  }
+
+  function accountPanel(render, setRefreshing) {
+    const panel = el("section", { class:"penecho-cloud-panel cloud-account-panel" });
+    panel.append(pageHeading(cloudT("cloudAccount"), accountSignedIn() ? cloudT("accountHint") : cloudT("localSignInHelp")));
     if (accountSignedIn()) {
       const account = state.status.account || {};
-      panel.append(el("div", { class:"cloud-account-summary" }, [
-        el("div", { class:"cloud-avatar", text:String(account.name || "P").slice(0, 1).toUpperCase() }),
-        el("div", {}, [el("strong", { text:account.name || cloudT("cloudUser") }), el("span", { text:cloudT("credits", { count:Number(account.credits || 0) }) })]),
-      ]));
-      panel.append(el("div", { class:"cloud-button-row cloud-compact-actions" }, [
-        el("button", { class:"cloud-button", type:"button", text:cloudT("refreshAccount"), onclick:async () => action(render, async () => refreshStatus(true)) }),
+      const identity = el("div", { class:"cloud-settings-group cloud-account-profile" }, [
+        el("div", { class:"cloud-setting-row cloud-account-identity" }, [
+          el("div", { class:"cloud-avatar", text:String(account.name || "P").slice(0, 1).toUpperCase() }),
+          el("div", { class:"cloud-account-copy" }, [
+            el("strong", { class:"cloud-account-name", text:account.name || cloudT("cloudUser") }),
+            el("span", { text:cloudT("credits", { count:Number(account.credits || 0) }) }),
+          ]),
+        ]),
+      ]);
+      const overview = el("section", { class:"cloud-account-overview", "aria-live":"polite", "aria-busy":"true" });
+      const renderOverview = () => {
+        const library = state.library;
+        if (!library) {
+          overview.replaceChildren(el("div", { class:"cloud-message", role:"status", text:cloudT("loadingProjects") }));
+          return;
+        }
+        const workspace = library.workspace || {};
+        const projects = Array.isArray(library.projects) ? library.projects.filter((project) => project.systemKey !== "uncategorized") : [];
+        const canvases = Array.isArray(library.canvases) ? library.canvases : [];
+        const used = Number(workspace.storageUsedBytes || 0) + Number(workspace.storageReservedBytes || 0);
+        const limit = Number(workspace.storageLimitBytes || 0);
+        const storageCopy = limit
+          ? `${cloudT("used", { size:formatBytes(used) })}${cloudT("of", { size:formatBytes(limit) })}`
+          : cloudT("used", { size:formatBytes(used) });
+        overview.replaceChildren(
+          el("h4", { class:"cloud-section-heading", text:cloudT("accountOverview") }),
+          el("div", { class:"cloud-settings-group cloud-account-stats" }, [
+            el("div", { class:"cloud-setting-row" }, [el("span", { text:cloudT("accountProjects") }), el("strong", { text:String(projects.length) })]),
+            el("div", { class:"cloud-setting-row" }, [el("span", { text:cloudT("accountCanvases") }), el("strong", { text:String(canvases.length) })]),
+            el("div", { class:"cloud-setting-row cloud-storage-row" }, [
+              el("div", { class:"cloud-setting-copy" }, [el("span", { text:cloudT("storageUsed") }), el("small", { text:storageCopy })]),
+              el("progress", { class:"cloud-storage-track", max:String(Math.max(1, limit)), value:String(Math.min(used, Math.max(1, limit))), "aria-label":cloudT("storageUsed") }),
+            ]),
+          ]),
+        );
+        overview.setAttribute("aria-busy", "false");
+      };
+      renderOverview();
+      const actions = el("div", { class:"cloud-button-row cloud-page-actions" }, [
+        el("button", { class:"cloud-button", type:"button", text:cloudT("refreshAccount"), onclick:async () => action(render, async () => {
+          await refreshStatus(true);
+          state.library = await loadCloudLibrary();
+        }) }),
         el("button", { class:"cloud-button danger", type:"button", text:cloudT("signOutHost"), onclick:async () => {
           if (!window.confirm(cloudT("signOutConfirm"))) return;
-          await action(render, async () => { await api("/api/cloud/sign-out", { method:"POST", body:"{}" }); await refreshStatus(); });
+          await action(render, async () => {
+            await api("/api/cloud/sign-out", { method:"POST", body:"{}" });
+            state.library = null;
+            await refreshStatus();
+          });
         } }),
-      ]));
+      ]);
+      panel.append(identity, overview, actions);
+      const requestId = ++state.accountRequestId;
+      setRefreshing(true);
+      queueMicrotask(async () => {
+        try {
+          const library = await loadCloudLibrary();
+          if (requestId !== state.accountRequestId) return;
+          state.library = library;
+          if (panel.isConnected) renderOverview();
+        } catch (error) {
+          if (requestId !== state.accountRequestId) return;
+          if (!state.library && panel.isConnected) overview.replaceChildren(el("div", { class:"cloud-message error", role:"alert", text:error.message }));
+        } finally {
+          if (requestId === state.accountRequestId) {
+            overview.setAttribute("aria-busy", "false");
+            setRefreshing(false);
+          }
+        }
+      });
       return panel;
     }
 
     if (configuredCloudEnvironment === "uat") panel.append(el("div", { class:"cloud-environment" }, [el("span", { text:"UAT" }), el("code", { text:cloudOrigin() })]));
-    panel.append(el("p", { text:cloudT("localSignInHelp") }));
     const browserSignIn = state.browserSignIn;
     const message = el("div", {
       class:`cloud-message${browserSignIn.tone ? ` ${browserSignIn.tone}` : ""}`,
@@ -817,18 +972,31 @@
     if (browserSignIn.active && browserSignIn.authorizationUrl) {
       browserActions.append(el("a", { class:"cloud-button", href:browserSignIn.authorizationUrl, target:"_blank", rel:"noopener", text:browserSignIn.popupBlocked ? cloudT("openSignIn") : cloudT("openAgain") }));
     }
-    panel.append(browserActions);
+    panel.append(el("div", { class:"cloud-settings-group cloud-sign-in-group" }, browserActions));
     if (browserSignIn.message) panel.append(message);
     return panel;
   }
 
   function devicePanel(render) {
-    const panel = el("section", { class:"penecho-cloud-panel" });
-    panel.append(el("h3", { text:cloudT("linkThisDevice") }));
+    const panel = el("section", { class:"penecho-cloud-panel cloud-device-panel" });
+    panel.append(pageHeading(cloudT("linkThisDevice"), cloudT("linkDeviceHint")));
     const device = state.status.device || {};
     if (device.configured) {
-      panel.append(el("p", { text:`${device.name || cloudT("thisDevice")} · ${device.connected ? cloudT("connected") : device.enabled ? cloudT("connecting") : cloudT("paused")}` }));
-      const actions = el("div", { class:"cloud-button-row cloud-compact-actions" });
+      const connection = cloudDeviceConnectionStatus();
+      panel.append(el("div", { class:"cloud-settings-group" }, [
+        el("div", { class:"cloud-setting-row cloud-device-summary" }, [
+          el("div", { class:"cloud-setting-copy" }, [
+            el("strong", { class:"cloud-device-name", text:device.name || cloudT("thisDevice") }),
+            el("small", { text:cloudT("thisDevice") }),
+          ]),
+          el("span", {
+            class:"cloud-device-state",
+            "data-state":connection.state,
+            text:connection.label,
+          }),
+        ]),
+      ]));
+      const actions = el("div", { class:"cloud-button-row cloud-page-actions" });
       actions.append(el("button", { class:"cloud-button", type:"button", text:device.enabled ? cloudT("pauseLink") : cloudT("enableLink"), onclick:async () => action(render, async () => {
         await api(`/api/cloud/device/${device.enabled ? "disable" : "enable"}`, { method:"POST", body:"{}" });
         await refreshStatus();
@@ -843,6 +1011,11 @@
     }
     if (!accountSignedIn()) {
       panel.append(el("p", { text:cloudT("linkSignInFirst") }));
+      panel.append(el("button", { class:"cloud-button", type:"button", text:cloudT("openAccount"), onclick:() => {
+        state.cloudSection = "account";
+        render();
+        queueMicrotask(() => document.querySelector("#cloud-tab-account")?.focus());
+      } }));
       return panel;
     }
     panel.append(el("p", {}, [
@@ -852,12 +1025,13 @@
     ]));
     const code = el("input", { type:"text", maxlength:"32", autocomplete:"one-time-code", placeholder:cloudT("pairingKey") });
     const name = el("input", { type:"text", maxlength:"80", value:cloudT("myPenEcho"), placeholder:cloudT("deviceName") });
-    panel.append(field(cloudT("pairingKey"), code), field(cloudT("deviceName"), name));
-    panel.append(el("button", { class:"cloud-button primary", type:"button", text:cloudT("linkDevice"), onclick:async () => action(render, async () => {
+    const form = el("div", { class:"cloud-settings-group cloud-device-form" }, [field(cloudT("pairingKey"), code), field(cloudT("deviceName"), name)]);
+    panel.append(form);
+    panel.append(el("div", { class:"cloud-button-row cloud-page-actions" }, el("button", { class:"cloud-button primary", type:"button", text:cloudT("linkDevice"), onclick:async () => action(render, async () => {
       await api("/api/cloud/pair", { method:"POST", body:JSON.stringify({ origin:cloudOrigin(), code:code.value.trim(), name:name.value.trim() }) });
       await refreshStatus();
       startDeviceConnectionWatch(render);
-    }) }));
+    }) })));
     return panel;
   }
 
@@ -880,6 +1054,12 @@
     let size = bytes / 1024, unit = units[0];
     for (let index = 1; index < units.length && size >= 1024; index++) { size /= 1024; unit = units[index]; }
     return `${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${unit}`;
+  }
+
+  async function loadCloudLibrary() {
+    const library = await api("/api/cloud/library");
+    if (library?.sync?.bundleVersion !== 2 || library.sync.conflictPolicy !== "base-revision-required") throw Error(cloudT("syncUnsupported"));
+    return library;
   }
 
   async function openProjectCanvasHere(canvasId, owner, control) {
@@ -942,12 +1122,10 @@
     }
 
     function renderLibrary() {
-      const library = state.library || {}, workspace = library.workspace || {}, projects = Array.isArray(library.projects) ? library.projects : [], canvases = Array.isArray(library.canvases) ? library.canvases : [];
-      const used = Number(workspace.storageUsedBytes || 0) + Number(workspace.storageReservedBytes || 0), limit = Number(workspace.storageLimitBytes || 0);
-      const storage = el("div", { class:"cloud-storage-summary compact" }, [
-        el("div", {}, [el("strong", { text:cloudT("used", { size:formatBytes(used) }) }), el("span", { text:limit ? cloudT("of", { size:formatBytes(limit) }) : "" })]),
-        el("progress", { class:"cloud-storage-track", max:String(Math.max(1, limit)), value:String(Math.min(used, Math.max(1, limit))), "aria-label":cloudT("storageUsed") }),
-        el("small", { text:cloudT("storageHelp") }),
+      const library = state.library || {}, projects = Array.isArray(library.projects) ? library.projects : [], canvases = Array.isArray(library.canvases) ? library.canvases : [];
+      const pageHeader = el("header", { class:"cloud-content-heading cloud-project-page-header" }, [
+        el("h3", { text:cloudT("cloudProjects") }),
+        el("p", { text:cloudT("cloudProjectsHint") }),
       ]);
       const project = selectedProject(projects);
       const selector = el("select", { "aria-label":cloudT("currentProject"), onchange:(event) => {
@@ -973,11 +1151,11 @@
         el("summary", { class:"cloud-button", text:cloudT("newProject") }),
         el("div", { class:"cloud-project-create-form" }, [createName, createButton]),
       );
-      const commandBar = el("div", { class:"cloud-project-toolbar" }, [
-        picker,
+      const projectActions = el("div", { class:"cloud-project-actions" }, [
         project ? el("button", { class:"cloud-button primary", type:"button", text:cloudT("saveCurrentHere"), onclick:() => openProjectHistory(project.id) }) : null,
         createDetails,
       ]);
+      const commandBar = el("div", { class:"cloud-project-toolbar" }, [picker, projectActions]);
       const card = el("article", { class:"cloud-project-card" });
       if (project) {
         const projectCanvases = canvases.filter((canvas) => canvas.projectId === project.id);
@@ -1004,7 +1182,7 @@
         card.append(list);
       }
       const projectArea = project ? card : el("div", { class:"cloud-empty", text:cloudT("noProjects") });
-      content.replaceChildren(storage, commandBar, projectArea, el("a", { class:"cloud-project-web-link", href:new URL("/dashboard.html#projects", `${cloudOrigin()}/`).toString(), target:"_blank", rel:"noopener", text:cloudT("manageWeb") }));
+      content.replaceChildren(pageHeader, commandBar, projectArea, el("a", { class:"cloud-project-web-link", href:new URL("/dashboard.html#projects", `${cloudOrigin()}/`).toString(), target:"_blank", rel:"noopener", text:cloudT("manageWeb") }));
     }
     async function load() {
       const requestId = ++state.projectRequestId;
@@ -1012,8 +1190,7 @@
       setRefreshing(true);
       if (!state.library) content.replaceChildren(el("div", { class:"cloud-message", role:"status", text:cloudT("loadingProjects") }));
       try {
-        const library = await api("/api/cloud/library");
-        if (library?.sync?.bundleVersion !== 2 || library.sync.conflictPolicy !== "base-revision-required") throw Error(cloudT("syncUnsupported"));
+        const library = await loadCloudLibrary();
         if (requestId !== state.projectRequestId) return;
         state.library = library;
         if (panel.isConnected) renderLibrary();
@@ -1043,7 +1220,7 @@
   }
 
   function favoriteCanvasRow(item, owner) {
-    const open = el("button", { class:"cloud-button primary", type:"button", text:cloudT("openCanvasHere"), onclick:async () => {
+    const open = el("button", { class:"cloud-button cloud-row-action", type:"button", text:cloudT("openCanvasHere"), onclick:async () => {
       if (state.busy) return;
       state.busy = true;
       open.disabled = true;
@@ -1074,7 +1251,7 @@
   function favoriteWidgetRow(merged, owner) {
     const community = merged.sources.find((source) => source.type === "community")?.entry || null;
     const source = community || merged.sources.find((entry) => entry.type === "cloud")?.entry || merged.sources[0]?.entry || {};
-    const add = el("button", { class:"cloud-button primary", type:"button", text:cloudT("addToCanvas"), onclick:async () => {
+    const add = el("button", { class:"cloud-button cloud-row-action", type:"button", text:cloudT("addToCanvas"), onclick:async () => {
       if (state.busy) return;
       state.busy = true;
       add.disabled = true;
@@ -1105,12 +1282,15 @@
 
   function cloudFavoritesPanel(setRefreshing) {
     const panel = el("section", { class:"penecho-cloud-panel cloud-favorites-panel" });
-    panel.append(el("p", { class:"cloud-favorites-hint", text:cloudT("favoritesHint") }));
+    panel.append(el("header", { class:"cloud-content-heading" }, [
+      el("h3", { "data-pe-region":"title", text:cloudT("favorites") }),
+      el("p", { class:"cloud-favorites-hint", text:cloudT("favoritesHint") }),
+    ]));
     if (!accountSignedIn()) {
       panel.append(cloudSignInEmpty("signInFavorites"));
       return panel;
     }
-    const filters = el("div", { class:"cloud-favorite-filters", role:"group", "aria-label":cloudT("favorites") });
+    const filters = el("div", { class:"cloud-favorite-filters", role:"group", "aria-label":cloudT("favorites"), "data-pe-control":"segmented" });
     const content = el("div", { class:"cloud-library-list", "aria-live":"polite", "aria-busy":"true" });
     panel.append(filters, content);
     let pager = favoritePagerForKind(state.cloudFavoriteKind);
@@ -1142,16 +1322,17 @@
       if (!rows.length && pager.loading) rows.push(el("div", { class:"cloud-message", role:"status", text:cloudT("loadingFavorites") }));
       else if (!rows.length && pager.error) rows.push(el("div", { class:"cloud-message error", role:"alert", text:pager.error?.message || cloudT("favoriteLoadFailed") }));
       else if (!rows.length) rows.push(el("div", { class:"cloud-empty", text:cloudT(emptyKey) }));
-      if (favoritePagerHasMore(pager)) {
+      if (pager.error || favoritePagerHasMore(pager)) {
+        const retrying = Boolean(pager.error);
         const more = el("button", {
           class:"cloud-button cloud-favorites-load-more",
           type:"button",
           disabled:Boolean(pager.loading),
           text:pager.loading ? cloudT("loadingFavorites") : pager.error ? cloudT("retryFavorites") : cloudT("loadMoreFavorites"),
-          onclick:() => void load(false),
+          onclick:() => void load(retrying),
         });
         rows.push(more);
-        observer = observeFavoritePagerSentinel(more, null, () => load(false));
+        if (!retrying && !pager.loading) observer = observeFavoritePagerSentinel(more, null, () => load(false));
       }
       content.replaceChildren(...rows);
     }
@@ -1185,31 +1366,46 @@
     return panel;
   }
 
-  function cloudSectionPanel(setRefreshing) {
+  function cloudSectionPanel(render, setRefreshing) {
+    if (state.cloudSection === "account") return accountPanel(render, setRefreshing);
+    if (state.cloudSection === "device") return devicePanel(render);
     if (state.cloudSection === "favorites") return cloudFavoritesPanel(setRefreshing);
     return cloudProjectsPanel(setRefreshing);
   }
 
   async function openCloud() {
     cloudButton.setAttribute("aria-expanded", "true");
-    const shell = dialogShell({ title:"PenEcho Cloud", subtitle:cloudT("cloudSubtitle") });
+    const shell = dialogShell({ title:"PenEcho Cloud", subtitle:cloudT("cloudSubtitle"), variant:"cloud-center" });
+    shell.dialog.dataset.peSurface = "manager";
+    shell.dialog.dataset.peSize = "xl";
+    shell.dialog.dataset.peLayout = "nav-content";
+    shell.dialog.dataset.peMaterial = "opaque";
+    shell.dialog.querySelector(".cloud-dialog-titlebar")?.setAttribute("data-pe-region", "header");
+    shell.body.dataset.peRegion = "body";
     activeCloudOverlay = shell.overlay;
     const layout = el("div", { class:"penecho-cloud-layout" });
     shell.body.append(layout);
     function render() {
       const workspace = el("div", { class:"cloud-workspace" });
-      const sections = el("nav", { class:"cloud-section-tabs", role:"tablist", "aria-label":cloudT("cloudArea") });
-      const definitions = [
-        ["projects", "cloudProjects"],
-        ["favorites", "favorites"],
-      ];
-      for (const [value, label] of definitions) {
+      workspace.dataset.peRegion = "content";
+      if (!localHostControlsAvailable && !["projects", "favorites"].includes(state.cloudSection)) state.cloudSection = "projects";
+      const sections = el("nav", { class:"cloud-section-tabs", role:"tablist", "aria-label":cloudT("cloudArea"), "aria-orientation":"vertical" });
+      const appendSection = (value, label, meta = "", navHeading = "", trailing = null) => {
         const active = state.cloudSection === value;
+        const localOnly = value === "account" || value === "device";
+        const copy = el("span", { class:"cloud-nav-copy" }, [
+          el("strong", { text:cloudT(label) }),
+          meta ? el("span", { class:"cloud-nav-meta", text:meta }) : null,
+        ]);
+        if (navHeading) sections.append(el("span", { class:"cloud-nav-heading", role:"presentation", text:navHeading }));
         sections.append(el("button", {
           id:`cloud-tab-${value}`,
-          class:`cloud-section-tab${active ? " active" : ""}`,
+          class:`cloud-section-tab cloud-section-tab-${value}${localOnly ? " cloud-local-controls" : ""}${active ? " active" : ""}`,
           type:"button",
           role:"tab",
+          "data-pe-button":"menu-item",
+          "data-pe-state":active ? "selected" : "default",
+          "data-cloud-section":value,
           "aria-selected":String(active),
           "aria-controls":"cloud-section-panel",
           tabindex:active ? "0" : "-1",
@@ -1218,20 +1414,44 @@
             render();
             queueMicrotask(() => document.querySelector(`#cloud-tab-${value}`)?.focus());
           },
-        }, [el("strong", { text:cloudT(label) })]));
+        }, [el("span", { class:"cloud-nav-icon", "aria-hidden":"true" }), copy, trailing]));
+      };
+      if (localHostControlsAvailable) {
+        const accountName = accountSignedIn() ? String(state.status?.account?.name || cloudT("cloudUser")) : cloudT("signIn");
+        appendSection("account", "cloudAccount", accountName);
+        const device = state.status?.device || {};
+        const deviceMeta = device.configured
+          ? String(device.name || (device.connected ? cloudT("connected") : device.enabled ? cloudT("connecting") : cloudT("paused")))
+          : accountSignedIn() ? cloudT("notLinked") : cloudT("signIn");
+        const connection = cloudDeviceConnectionStatus();
+        appendSection("device", "linkThisDevice", deviceMeta, "", el("span", {
+          class:"cloud-device-status-dot",
+          "data-state":connection.state,
+          role:"img",
+          "aria-label":connection.label,
+          title:connection.label,
+        }));
       }
+      const definitions = [
+        ["projects", "cloudProjects"],
+        ["favorites", "favorites"],
+      ];
+      definitions.forEach(([value, label], index) => appendSection(value, label, "", index === 0 ? cloudT("cloudNavLibrary") : ""));
       sections.append(el("a", {
         class:"cloud-section-tab cloud-explore-link",
         href:new URL("/community.html", `${cloudOrigin()}/`).toString(),
         target:"_blank",
         rel:"noopener",
-      }, [el("strong", { text:`${cloudT("explore")} ↗` })]));
+        "data-cloud-section":"echoes",
+        "data-pe-button":"menu-item",
+        "data-pe-state":"default",
+      }, [el("span", { class:"cloud-nav-icon", "aria-hidden":"true" }), el("span", { class:"cloud-nav-copy" }, el("strong", { text:`${cloudT("explore")} ↗` }))]));
       sections.addEventListener("keydown", (event) => {
-        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key) || event.target?.getAttribute?.("role") !== "tab") return;
+        if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key) || event.target?.getAttribute?.("role") !== "tab") return;
         const tabs = [...sections.querySelectorAll('[role="tab"]')], current = tabs.indexOf(event.target);
         if (current < 0) return;
         event.preventDefault();
-        const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+        const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (current + (event.key === "ArrowDown" ? 1 : -1) + tabs.length) % tabs.length;
         tabs[next].focus();
         tabs[next].click();
       });
@@ -1244,18 +1464,16 @@
       refreshIndicator.hidden = true;
       const setRefreshing = (refreshing) => { refreshIndicator.hidden = !refreshing; };
       const sectionToolbar = el("div", { class:"cloud-section-toolbar" }, [sections, refreshIndicator]);
-      const sectionPanel = cloudSectionPanel(setRefreshing);
+      const sectionPanel = cloudSectionPanel(render, setRefreshing);
       sectionPanel.id = "cloud-section-panel";
       sectionPanel.setAttribute("role", "tabpanel");
       sectionPanel.setAttribute("aria-labelledby", `cloud-tab-${state.cloudSection}`);
-      workspace.append(sectionToolbar, sectionPanel);
+      workspace.append(sectionPanel);
+      const navigation = el("aside", { class:"cloud-navigation penecho-workbench-navigation", "aria-label":cloudT("cloudArea") });
+      navigation.dataset.peRegion = "navigator";
       layout.classList.toggle("remote-cloud-runtime", !localHostControlsAvailable);
-      if (localHostControlsAvailable) {
-        const accountColumn = el("aside", { class:"cloud-local-controls", "aria-label":cloudT("thisDevice") }, [accountPanel(render), devicePanel(render)]);
-        layout.replaceChildren(accountColumn, workspace);
-      } else {
-        layout.replaceChildren(workspace);
-      }
+      navigation.append(sectionToolbar);
+      layout.replaceChildren(navigation, workspace);
     }
     shell.overlay._cloudRender = render;
     render();
@@ -1360,6 +1578,7 @@
   function shareDialog({ kind, widgetId = null, favoriteAfterShare = false }) {
     if (!accountSignedIn()) {
       browserSignInMessage(cloudT("shareSignInRequired"));
+      state.cloudSection = "account";
       void openCloud();
       return;
     }
@@ -1378,10 +1597,13 @@
     const autoFill=el("button", { class:"cloud-button cloud-ai-fill", type:"button", text:cloudT("autoFillCurrentAi"), disabled:"" });
     const contribution = el("textarea", { rows:"3", maxlength:"500", placeholder:cloudT("contributionPlaceholder") });
     const continuation = el("textarea", { rows:"3", maxlength:"500", placeholder:cloudT("continuationPlaceholder") });
-    const permission = el("input", { type:"checkbox" });
-    const permissionLabel = el("label", { class:"cloud-publication-consent" }, [permission, el("span", {}, [
+    const permission = el("input", { type:"checkbox", "data-pe-control":"checkbox" });
+    const permissionLabel = el("label", { class:"cloud-publication-consent", "data-pe-hit":"choice" }, [permission, el("span", {}, [
       document.createTextNode(cloudT("publicationAgreementBeforeLink")),
-      el("a", { href:new URL("/terms.html#public-crafts",`${cloudOrigin()}/`).toString(), target:"_blank", rel:"noopener", text:cloudT("publicationAgreementLink") }),
+      el("a", { class:"cloud-publication-link", href:new URL("/terms.html#public-crafts",`${cloudOrigin()}/`).toString(), target:"_blank", rel:"noopener" }, [
+        document.createTextNode(cloudT("publicationAgreementLink")),
+        el("span", { class:"cloud-external-link-mark", "aria-hidden":"true", text:"↗" }),
+      ]),
       document.createTextNode(cloudT("publicationAgreementAfterLink")),
     ])]);
     let artifact=null,lineage=null,draftKey=null,publish=null,publishing=false,validationAttempted=false;
@@ -1502,7 +1724,7 @@
     permission.addEventListener("change",updatePublishAvailability);
   }
 
-  async function takeFurther(itemId) {
+  async function takeFurther(itemId, importOptions = null) {
     const encodedItemId = encodeURIComponent(itemId);
     let downloaded;
     if (window.PENECHO_CONFIG?.runtime === "cloud") {
@@ -1523,7 +1745,7 @@
     const item = downloaded.item;
     if (item?.kind === "widget") {
       if (!window.PenEchoCommunityCanvas?.importWidget) throw new Error(cloudT("communityWidgetImportUnavailable"));
-      await window.PenEchoCommunityCanvas.importWidget(downloaded.artifact, item);
+      await window.PenEchoCommunityCanvas.importWidget(downloaded.artifact, item, importOptions);
     } else if (item?.kind === "canvas") {
       if (!window.PenEchoCommunityCanvas?.importCanvas) throw new Error(cloudT("communityCanvasImportUnavailable"));
       await window.PenEchoCommunityCanvas.importCanvas(downloaded.artifact, item);
@@ -1542,17 +1764,32 @@
   const craftsPopover = document.getElementById("craftsPopover");
   const craftsClose = document.getElementById("craftsClose");
   const craftsList = document.getElementById("craftsList");
+  const craftsSearch = document.getElementById("craftsSearch");
+  const craftsCount = document.getElementById("craftsCount");
   const craftsRefreshStatus = document.getElementById("craftsRefreshStatus");
   const craftsFilters = document.getElementById("craftsFilters");
+  const craftsViewSwitch = document.getElementById("craftsViewSwitch");
+  const craftsEchoesLink = document.getElementById("craftsEchoesLink");
+  const craftsRemoveDialog = document.getElementById("craftsRemoveDialog");
+  const craftsRemoveTitle = document.getElementById("craftsRemoveTitle");
+  const craftsRemoveDescription = document.getElementById("craftsRemoveDescription");
+  const craftsRemoveCancel = document.getElementById("craftsRemoveCancel");
+  const craftsRemoveConfirm = document.getElementById("craftsRemoveConfirm");
   const craftFilterOptions = [
     { kind:"all", button:document.getElementById("craftsFilterAll"), label:"all", fallback:"All" },
     { kind:"widget", button:document.getElementById("craftsFilterWidgets"), label:"widgets", fallback:"Widgets" },
     { kind:"canvas", button:document.getElementById("craftsFilterCanvases"), label:"canvases", fallback:"Canvases" },
   ].filter((option) => option.button);
+  const craftViewOptions = [
+    { view:"list", button:document.getElementById("craftsViewList"), label:"savedListView", fallback:"List view" },
+    { view:"grid", button:document.getElementById("craftsViewGrid"), label:"savedGridView", fallback:"Grid view" },
+  ].filter((option) => option.button);
   let craftsPager = null;
   let craftsObserver = null;
   let craftsRefreshGeneration = 0;
   let selectedCraftKind = "all";
+  let selectedCraftView = "list";
+  let craftsRestoreFocus = null;
   const savedT = (key, fallback) => {
     const translated = window.PenEchoI18n?.t?.(key);
     if (translated && translated !== key) return translated;
@@ -1562,15 +1799,57 @@
   function updateCraftFilterTabs() {
     for (const option of craftFilterOptions) {
       const selected = option.kind === selectedCraftKind;
-      option.button.textContent = savedT(option.label, option.fallback);
+      const label = option.button.querySelector?.("[data-crafts-filter-label]");
+      if (label) label.textContent = savedT(option.label, option.fallback);
       option.button.classList.toggle("active", selected);
       option.button.setAttribute("aria-selected", String(selected));
       option.button.setAttribute("tabindex", selected ? "0" : "-1");
     }
   }
 
+  function craftSearchLocale() {
+    return document.documentElement.lang.startsWith("zh") ? "zh-CN" : "en";
+  }
+
+  function craftSearchQuery() {
+    return String(craftsSearch?.value || "").trim().toLocaleLowerCase(craftSearchLocale());
+  }
+
+  function favoriteCraftSearchText(craft) {
+    const fields = [savedT(craft.kind === "canvas" ? "savedCanvas" : "savedWidget", craft.kind === "canvas" ? "Canvas" : "Widget")];
+    for (const source of craft.sources || []) {
+      const entry = source.entry || {};
+      fields.push(entry.name, entry.description, entry.artifact?.widget?.title);
+    }
+    return fields.filter(Boolean).join("\n").toLocaleLowerCase(craftSearchLocale());
+  }
+
   function filteredFavoriteCrafts(entries) {
-    return selectedCraftKind === "all" ? entries : entries.filter((entry) => entry.kind === selectedCraftKind);
+    const query = craftSearchQuery();
+    return entries.filter((entry) => (selectedCraftKind === "all" || entry.kind === selectedCraftKind)
+      && (!query || favoriteCraftSearchText(entry).includes(query)));
+  }
+
+  function updateCraftView() {
+    const grid = selectedCraftView === "grid";
+    craftsList?.classList.toggle("is-grid", grid);
+    if (craftsList) craftsList.dataset.view = selectedCraftView;
+    for (const option of craftViewOptions) {
+      const selected = option.view === selectedCraftView;
+      const label = savedT(option.label, option.fallback);
+      option.button.classList.toggle("active", selected);
+      option.button.setAttribute("aria-pressed", String(selected));
+      option.button.setAttribute("aria-label", label);
+      option.button.title = label;
+    }
+    craftsViewSwitch?.setAttribute("aria-label", savedT("savedView", "View"));
+  }
+
+  function updateCraftsEchoesLink() {
+    if (!craftsEchoesLink) return;
+    craftsEchoesLink.setAttribute("href", new URL("/community.html", `${cloudOrigin()}/`).toString());
+    const label = craftsEchoesLink.querySelector?.(".crafts-echoes-label");
+    if (label) label.textContent = savedT("browseEchoes", "Browse Echoes");
   }
 
   function selectCraftKind(kind, focus = false) {
@@ -1584,6 +1863,9 @@
   }
 
   for (const option of craftFilterOptions) option.button.addEventListener("click", () => selectCraftKind(option.kind));
+  craftsSearch?.addEventListener("input", () => {
+    if (craftsPager) renderCraftsList(favoritePagerEntries(craftsPager));
+  });
   craftsFilters?.addEventListener("keydown", (event) => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     const current = Math.max(0, craftFilterOptions.findIndex((option) => option.kind === selectedCraftKind));
@@ -1594,22 +1876,38 @@
     selectCraftKind(craftFilterOptions[next].kind, true);
   });
 
+  for (const option of craftViewOptions) option.button.addEventListener("click", () => {
+    selectedCraftView = option.view;
+    updateCraftView();
+  });
+
   function setCraftsOpen(open) {
     if (!craftsPopover) return;
+    const wasOpen = !craftsPopover.hidden;
+    if (open && !wasOpen) craftsRestoreFocus = document.activeElement || craftsButton;
     craftsPopover.hidden = !open;
     craftsPopover.setAttribute("aria-hidden", String(!open));
     craftsButton?.setAttribute("aria-expanded", String(open));
-    if (open) document.body.classList.add("plugin-open");
+    if (open) {
+      document.body.classList.add("plugin-open");
+      if (!wasOpen) craftFilterOptions.find((option) => option.kind === selectedCraftKind)?.button.focus();
+    }
     else {
       document.body.classList.remove("plugin-open");
       craftsObserver?.disconnect();
       craftsObserver = null;
+      if (wasOpen) {
+        const restore = craftsRestoreFocus;
+        craftsRestoreFocus = null;
+        restore?.focus?.();
+      }
     }
   }
 
   function setCraftsRefreshing(refreshing) {
     if (!craftsRefreshStatus) return;
     craftsRefreshStatus.hidden = !refreshing;
+    craftsList?.setAttribute("aria-busy", String(refreshing));
     const copy = craftsRefreshStatus.lastElementChild;
     if (copy) copy.textContent = savedT("savedRefreshing", "Refreshing…");
   }
@@ -1655,6 +1953,25 @@
     return (await api(`/api/favorites/${encodeURIComponent(sha256)}/cloud`, { method:"PATCH", body:JSON.stringify({ cloudId }) })).favorite;
   }
 
+  const FAVORITE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+  function favoriteUuid(value) {
+    return FAVORITE_UUID.test(String(value || "")) ? String(value).toLowerCase() : null;
+  }
+
+  function privateFavoriteCraftKey(entry) {
+    const sourceWidgetId = favoriteUuid(entry?.sourceWidgetId);
+    return `widget:${sourceWidgetId ? `source:${sourceWidgetId}` : `artifact:${entry?.artifactSha256 || entry?.id}`}`;
+  }
+
+  function favoriteWidgetImportOptions(favorite, { cloudFavoriteId = null, communityItemId = null } = {}) {
+    const cloudId = favoriteUuid(cloudFavoriteId || favorite?.cloudId),
+      communityId = favoriteUuid(communityItemId),
+      sourceWidgetId = favoriteUuid(favorite?.sourceWidgetId) || favoriteUuid(favorite?.id) || communityId || cloudId,
+      artifactSha256 = /^[0-9a-f]{64}$/i.test(String(favorite?.artifactSha256 || "")) ? String(favorite.artifactSha256).toLowerCase() : null;
+    return { favoriteState:{ selected:true, sourceWidgetId, artifactSha256, cloudFavoriteId:cloudId, communityItemId:communityId } };
+  }
+
   function thumbnailDataUrl(favorite, communityId = null) {
     const base64 = favorite.thumbnail || favorite.artifact?.communityThumbnail?.dataBase64 || favorite.artifact?.communityPreview?.dataBase64;
     const contentType = favorite.thumbnail ? "image/webp" : (favorite.artifact?.communityThumbnail || favorite.artifact?.communityPreview)?.contentType || "image/webp";
@@ -1678,23 +1995,56 @@
   }
 
   /* One-click favorite on a widget: local snapshot always, cloud copy when signed in. */
-  async function toggleWidgetFavorite(widgetId) {
+  async function toggleWidgetFavorite(widgetId, current = null) {
     const bridge = window.PenEchoCommunityCanvas;
     if (!bridge?.widgetArtifact || !bridge.setWidgetFavorite) throw new Error(cloudT("favoriteUnsupported"));
-    const artifact = await bridge.widgetArtifact(widgetId);
-    const serialized = { name:String(artifact.widget?.title || cloudT("untitledWidget")).slice(0, 160), artifact, thumbnail:artifact.communityThumbnail?.dataBase64 || "", sourceItemId:artifact.widget?.communityOriginItemId || null };
-    const localWrite = await saveLocalFavorite({ ...serialized, cloudId:null }, true),
-      saved = localWrite.favorite;
-    if (!localWrite.created) {
-      await removeLocalFavorite(saved.artifactSha256);
-      if (accountSignedIn() && saved.cloudId) { try { await api(`/api/cloud/favorites/${encodeURIComponent(saved.cloudId)}`, { method:"DELETE" }); } catch {} }
-      bridge.setWidgetFavorite(widgetId, false);
+    if (current?.favorite === true) {
+      const sha256 = /^[0-9a-f]{64}$/i.test(String(current.favoriteArtifactSha256 || ""))
+          ? String(current.favoriteArtifactSha256).toLowerCase()
+          : "",
+        sourceWidgetId = favoriteUuid(current.sourceWidgetId),
+        currentCloudId = favoriteUuid(current.favoriteCloudId),
+        communityItemId = favoriteUuid(current.favoriteCommunityItemId);
+      let saved = null;
+      if (!isCloudRuntime() && sha256) {
+        try { saved = await fullLocalFavorite({ artifactSha256:sha256 }); }
+        catch (error) { if (error?.status !== 404) throw error; }
+      }
+      // The hash identifies a stored snapshot version, not the logical Widget.
+      // If another Canvas updated that favorite, resolve its latest snapshot by
+      // the stable source Widget id before removing it.
+      if (!isCloudRuntime() && !saved && sourceWidgetId) {
+        const summary = (await localFavorites()).find((entry) => favoriteUuid(entry.sourceWidgetId) === sourceWidgetId);
+        if (summary) saved = await fullLocalFavorite(summary);
+      }
+      const cloudId = currentCloudId || favoriteUuid(saved?.cloudId);
+      if (cloudId) await api(`/api/cloud/favorites/${encodeURIComponent(cloudId)}`, { method:"DELETE" });
+      if (communityItemId) await api(`/api/cloud/community/${encodeURIComponent(communityItemId)}/favorite`, { method:"DELETE" });
+      if (saved?.artifactSha256) await api(`/api/favorites/${encodeURIComponent(saved.artifactSha256)}`, { method:"DELETE" });
+      bridge.setWidgetFavorite(widgetId, false, false, "", { cloudFavoriteId:null, communityItemId:null });
       return false;
     }
+    const artifact = await bridge.widgetArtifact(widgetId);
+    const serialized = {
+      name:String(artifact.widget?.title || cloudT("untitledWidget")).slice(0, 160),
+      artifact,
+      thumbnail:artifact.communityThumbnail?.dataBase64 || "",
+      sourceItemId:artifact.widget?.communityOriginItemId || null,
+      sourceWidgetId:current?.sourceWidgetId || null,
+    };
+    if (isCloudRuntime()) {
+      const cloudFavorite = (await api("/api/cloud/favorites", { method:"POST", body:JSON.stringify(serialized) })).favorite;
+      bridge.setWidgetFavorite(widgetId, true, false, cloudFavorite.artifactSha256 || "", { cloudFavoriteId:cloudFavorite.id, communityItemId:null });
+      return true;
+    }
+    const localWrite = await saveLocalFavorite({ ...serialized, cloudId:null }, true),
+      saved = localWrite.favorite;
+    let cloudFavoriteId = favoriteUuid(saved.cloudId);
     if (accountSignedIn()) {
       let removedDuringUpload = false;
       try {
         const cloudFavorite = (await api("/api/cloud/favorites", { method:"POST", body:JSON.stringify(serialized) })).favorite;
+        cloudFavoriteId = favoriteUuid(cloudFavorite.id);
         try { await linkLocalFavoriteToCloud(saved.artifactSha256, cloudFavorite.id); }
         catch (error) {
           if (error?.status !== 404) throw error;
@@ -1705,11 +2055,11 @@
         if (error?.code === "storage_quota_exceeded") window.alert(cloudT("favoriteLocalOnlyQuota"));
       }
       if (removedDuringUpload) {
-        bridge.setWidgetFavorite(widgetId, false);
+        bridge.setWidgetFavorite(widgetId, false, false, "", { cloudFavoriteId:null, communityItemId:null });
         return false;
       }
     }
-    bridge.setWidgetFavorite(widgetId, true);
+    bridge.setWidgetFavorite(widgetId, true, false, saved.artifactSha256, { cloudFavoriteId, communityItemId:null });
     return true;
   }
 
@@ -1724,7 +2074,7 @@
       try {
         const localEntry = await fullLocalFavorite(entry), uploaded = (await api("/api/cloud/favorites", {
           method:"POST",
-          body:JSON.stringify({ name:localEntry.name, artifact:localEntry.artifact, thumbnail:localEntry.thumbnail, sourceItemId:localEntry.sourceItemId }),
+          body:JSON.stringify({ name:localEntry.name, artifact:localEntry.artifact, thumbnail:localEntry.thumbnail, sourceItemId:localEntry.sourceItemId, sourceWidgetId:localEntry.sourceWidgetId }),
         })).favorite;
         try { await linkLocalFavoriteToCloud(entry.artifactSha256, uploaded.id); }
         catch (error) {
@@ -1733,7 +2083,11 @@
           continue;
         }
         synced += 1;
-      } catch {}
+      } catch (error) {
+        // An account/session rejection applies to the whole batch. Continuing
+        // would only send the same unauthorized request once per local item.
+        if (error?.status === 401 || error?.status === 403) break;
+      }
     }
     return { synced };
   }
@@ -1748,7 +2102,7 @@
   const FAVORITE_PAGE_SIZE = 20;
 
   function favoriteCraftsFromLocal(locals) {
-    return locals.map((entry) => ({ key:`widget:${entry.artifactSha256}`, kind:"widget", sources:[{ type:"local", entry }] }));
+    return locals.map((entry) => ({ key:privateFavoriteCraftKey(entry), kind:"widget", sources:[{ type:"local", entry }] }));
   }
 
   function favoriteCraftsFromFeed(items) {
@@ -1757,10 +2111,10 @@
         const entry = { ...(item.item || {}), favoritedAt:item.favoritedAt };
         return item.kind === "canvas"
           ? { key:`canvas:${entry.id}`, kind:"canvas", sources:[{ type:"community", entry }] }
-          : { key:`widget:${entry.artifactSha256 || entry.artifact?.sha256 || entry.id}`, kind:"widget", sources:[{ type:"community", entry }] };
+          : { key:`widget:artifact:${entry.artifactSha256 || entry.artifact?.sha256 || entry.id}`, kind:"widget", sources:[{ type:"community", entry }] };
       }
       const entry = { ...(item.favorite || {}), favoritedAt:item.favoritedAt };
-      return { key:`widget:${entry.artifactSha256 || entry.id}`, kind:"widget", sources:[{ type:"cloud", entry }] };
+      return { key:privateFavoriteCraftKey(entry), kind:"widget", sources:[{ type:"cloud", entry }] };
     }).filter((entry) => !entry.key.endsWith(":undefined"));
   }
 
@@ -1821,13 +2175,14 @@
     const promise = (async () => {
       if (reset) {
         if (!pager.visibleLimit) pager.visibleLimit = FAVORITE_PAGE_SIZE;
+        let cloudLoaded = false;
         const localTask = (isCloudRuntime() ? Promise.resolve([]) : localFavorites()).then((locals) => {
           if (generation !== pager.generation) return;
           pager.locals = locals.filter((entry) => pager.kind !== "canvas");
-          scheduleLocalFavoriteSync(pager.locals);
           onUpdate(pager);
         }), cloudTask = cloudFavoritePage(pager.kind).then((page) => {
           if (generation !== pager.generation) return;
+          cloudLoaded = true;
           pager.remote = favoriteCraftsFromFeed(page.items);
           pager.nextCursor = page.pagination?.nextCursor || null;
           pager.remoteHasMore = Boolean(page.pagination?.hasMore && pager.nextCursor);
@@ -1840,7 +2195,13 @@
           onUpdate(pager);
         });
         await Promise.all([localTask, cloudTask]);
-        if (generation === pager.generation) pager.visibleLimit = FAVORITE_PAGE_SIZE;
+        if (generation === pager.generation) {
+          pager.visibleLimit = FAVORITE_PAGE_SIZE;
+          // Do not fan a failed Cloud authorization out into one POST per
+          // unsynced local favorite. A successful feed proves the account
+          // route is available before the background upload begins.
+          if (cloudLoaded) scheduleLocalFavoriteSync(pager.locals);
+        }
         return pager;
       }
       if (pager.remoteHasMore) {
@@ -1864,7 +2225,12 @@
   function observeFavoritePagerSentinel(node, root, loadMore) {
     if (typeof IntersectionObserver !== "function") return null;
     const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) loadMore();
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      // A rendered sentinel owns exactly one automatic page request. The
+      // subsequent render creates the next sentinel only when another page
+      // still exists, preventing repeated callbacks for the same page.
+      observer.disconnect();
+      loadMore();
     }, { root, rootMargin:"160px 0px" });
     observer.observe(node);
     return observer;
@@ -1894,26 +2260,37 @@
   function craftsSourceBadge(sources) {
     const badge = document.createElement("span");
     badge.className = "crafts-source";
-    const cloud = sources.includes("cloud") || sources.includes("community");
-    if (cloud && sources.includes("local")) { badge.textContent = savedT("savedSourceSynced", "☁ + local"); badge.title = savedT("savedSourceCloudTitle", "On PenEcho Cloud and this device"); }
-    else if (cloud) { badge.textContent = sources.includes("community") ? savedT("savedSourceCommunity", "☁ community") : savedT("savedSourceCloud", "☁ cloud"); badge.title = savedT("savedSourceCloudTitle", "On PenEcho Cloud"); }
+    const types = sources.map((source) => source.type), local = types.includes("local"),
+      cloud = types.includes("cloud") || types.includes("community") || sources.some((source) => source.type === "local" && source.entry?.cloudId);
+    if (cloud && local) { badge.textContent = savedT("savedSourceSynced", "Cloud + local"); badge.title = savedT("savedSourceSyncedTitle", "On PenEcho Cloud and this device"); }
+    else if (cloud) { badge.textContent = types.includes("community") ? savedT("savedSourceCommunity", "Cloud community") : savedT("savedSourceCloud", "Cloud"); badge.title = savedT("savedSourceCloudTitle", "On PenEcho Cloud"); }
     else { badge.textContent = savedT("savedSourceLocal", "local"); badge.title = savedT("savedSourceLocalTitle", "On this device only — it uploads to PenEcho Cloud once you sign in"); }
     return badge;
   }
 
   async function addCraftToCanvas(merged) {
-    const local = merged.sources.find((entry) => entry.type === "local");
+    const local = merged.sources.find((entry) => entry.type === "local"),
+      cloud = merged.sources.find((entry) => entry.type === "cloud"),
+      community = merged.sources.find((entry) => entry.type === "community");
     if (local) {
       if (!window.PenEchoCommunityCanvas?.importWidget) throw new Error(cloudT("widgetImportUnavailable"));
       const favorite = await fullLocalFavorite(local.entry);
-      await window.PenEchoCommunityCanvas.importWidget(favorite.artifact, favorite.sourceItemId ? { id:favorite.sourceItemId, name:favorite.name } : null);
+      await window.PenEchoCommunityCanvas.importWidget(
+        favorite.artifact,
+        favorite.sourceItemId ? { id:favorite.sourceItemId, name:favorite.name } : null,
+        favoriteWidgetImportOptions(favorite, { cloudFavoriteId:favorite.cloudId || cloud?.entry?.id, communityItemId:community?.entry?.id }),
+      );
       return;
     }
-    const cloudEntry = (merged.sources.find((entry) => entry.type === "cloud") || merged.sources.find((entry) => entry.type === "community"))?.entry;
-    if (merged.sources.some((entry) => entry.type === "community")) return takeFurther(cloudEntry.id);
+    if (community) return takeFurther(community.entry.id, favoriteWidgetImportOptions(community.entry, { communityItemId:community.entry.id }));
+    const cloudEntry = cloud?.entry;
     if (!window.PenEchoCommunityCanvas?.importWidget) throw new Error(cloudT("widgetImportUnavailable"));
     const favorite = await fullCloudFavorite(cloudEntry);
-    await window.PenEchoCommunityCanvas.importWidget(favorite.artifact, favorite.sourceItemId ? { id:favorite.sourceItemId, name:favorite.name } : null);
+    await window.PenEchoCommunityCanvas.importWidget(
+      favorite.artifact,
+      favorite.sourceItemId ? { id:favorite.sourceItemId, name:favorite.name } : null,
+      favoriteWidgetImportOptions(favorite, { cloudFavoriteId:favorite.id }),
+    );
   }
 
   async function activateFavoriteCraft(merged) {
@@ -1938,32 +2315,63 @@
     }
   }
 
+  function confirmCraftRemoval(name) {
+    if (!craftsRemoveDialog || !craftsRemoveTitle || !craftsRemoveDescription || !craftsRemoveConfirm || craftsRemoveDialog.open) {
+      return Promise.resolve(false);
+    }
+    craftsRemoveDialog.returnValue = "cancel";
+    craftsRemoveTitle.textContent = savedT("savedRemoveConfirmTitle", "Remove from favorites?");
+    craftsRemoveDescription.textContent = savedT("savedRemoveConfirmDescription", "“{name}” will no longer appear in Favorites.").replace("{name}", name);
+    craftsRemoveConfirm.textContent = savedT("savedRemoveAction", "Remove");
+    return new Promise((resolve) => {
+      craftsRemoveDialog.addEventListener("close", () => resolve(craftsRemoveDialog.returnValue === "remove"), { once:true });
+      craftsRemoveDialog.showModal();
+      requestAnimationFrame(() => craftsRemoveCancel?.focus({ preventScroll:true }));
+    });
+  }
+
   function craftsRow(merged, removeFromCache) {
     const row = document.createElement("div");
     row.className = "crafts-row";
     const source = merged.sources[0].entry;
+    const media = document.createElement("span");
+    media.className = "crafts-thumb-wrap";
     const thumb = document.createElement("img");
     thumb.className = "crafts-thumb";
     thumb.alt = "";
     thumb.loading = "lazy";
     const community = merged.sources.find((entry) => entry.type === "community")?.entry || null,
       url = thumbnailDataUrl(source, community?.id || null);
-    if (url) { thumb.src = url; thumb.addEventListener("error", () => thumb.replaceWith(craftsFallbackThumb(merged.kind))); }
-    else thumb.replaceWith(craftsFallbackThumb(merged.kind));
+    if (url) { thumb.src = url; thumb.addEventListener("error", () => thumb.replaceWith(craftsFallbackThumb(merged.kind))); media.append(thumb); }
+    else media.append(craftsFallbackThumb(merged.kind));
+    const kindBadge = document.createElement("span");
+    kindBadge.className = `crafts-kind-badge ${merged.kind}`;
+    kindBadge.textContent = savedT(merged.kind === "canvas" ? "savedCanvas" : "savedWidget", merged.kind === "canvas" ? "Canvas" : "Widget");
     const copy = document.createElement("div");
     copy.className = "crafts-copy";
-    const title = document.createElement("b");
+    const title = document.createElement("span");
+    title.className = "crafts-card-title";
     const isCanvas = merged.kind === "canvas";
     title.textContent = source.name || savedT(isCanvas ? "untitledCanvas" : "untitledWidget", cloudT(isCanvas ? "untitledCanvas" : "untitledWidget"));
-    const byline = document.createElement("small");
-    byline.textContent = source.description || source.artifact?.widget?.title || savedT(isCanvas ? "savedCanvas" : "savedWidget", isCanvas ? "Canvas" : "Widget");
-    byline.append(document.createElement("br"), craftsSourceBadge(merged.sources.map((entry) => entry.type === "community" ? "community" : entry.type)));
-    copy.append(title, byline);
+    title.title = title.textContent;
+    const detail = String(source.description || source.artifact?.widget?.title || "").trim();
+    const meta = document.createElement("div");
+    meta.className = "crafts-meta";
+    meta.append(kindBadge, craftsSourceBadge(merged.sources));
+    copy.append(title);
+    if (detail && detail !== title.textContent) {
+      const byline = document.createElement("small");
+      byline.textContent = detail;
+      byline.title = detail;
+      copy.append(byline);
+    }
     const actions = document.createElement("div");
     actions.className = "crafts-actions";
     const add = document.createElement("button");
     add.type = "button";
     add.className = isCanvas ? "crafts-open" : "crafts-add";
+    add.dataset.peButton = "secondary";
+    add.dataset.peDensity = "compact";
     add.textContent = savedT(isCanvas ? "savedOpen" : "savedAdd", isCanvas ? "Open" : "Add");
     add.addEventListener("click", async () => {
       add.disabled = true;
@@ -1978,16 +2386,27 @@
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "crafts-remove";
-    remove.textContent = "×";
+    remove.dataset.peButton = "toolbar";
+    remove.dataset.peDensity = "compact";
+    remove.textContent = "";
     remove.title = savedT("savedRemoveTitle", "Remove from Favorites");
     remove.setAttribute("aria-label", `${savedT("savedRemoveTitle", "Remove from Favorites")}: ${source.name || ""}`);
     remove.addEventListener("click", async () => {
+      if (!await confirmCraftRemoval(title.textContent)) return;
       remove.disabled = true;
-      await removeCraft(merged);
-      removeFromCache(merged.key);
+      try {
+        await removeCraft(merged);
+        removeFromCache(merged.key);
+      } catch (error) {
+        remove.disabled = false;
+        alert(error?.message || savedT("savedErrorToggle", "Could not update this favorite."));
+      }
     });
     actions.append(add, remove);
-    row.append(thumb, copy, actions);
+    const footer = document.createElement("div");
+    footer.className = "crafts-footer";
+    footer.append(meta, actions);
+    row.append(media, copy, footer);
     return row;
   }
 
@@ -1995,38 +2414,47 @@
     craftsObserver?.disconnect();
     craftsObserver = null;
     const visibleEntries = filteredFavoriteCrafts(entries);
+    if (craftsCount) craftsCount.textContent = savedT("savedCount", "{count} favorites").replace("{count}", String(visibleEntries.length));
     const rows = [];
     if (!visibleEntries.length && craftsPager?.loading) {
       rows.push(el("p", { class:"crafts-empty", text:savedT("savedLoading", "Loading favorites…") }));
     } else if (!visibleEntries.length) {
-      const emptyText = selectedCraftKind === "canvas"
-        ? savedT("noFavoriteCanvases", cloudT("noFavoriteCanvases"))
-        : selectedCraftKind === "widget"
-          ? savedT("noFavoriteWidgets", cloudT("noFavoriteWidgets"))
-          : accountSignedIn()
-            ? savedT("savedEmptyIn", "No favorite Canvases or Widgets yet.")
-            : savedT("savedEmptyOut", "No local favorite Widgets yet. Sign in to see Cloud favorites.");
+      const emptyText = craftSearchQuery()
+        ? savedT("savedNoMatches", "No matching favorites.")
+        : selectedCraftKind === "canvas"
+          ? savedT("noFavoriteCanvases", cloudT("noFavoriteCanvases"))
+          : selectedCraftKind === "widget"
+            ? savedT("noFavoriteWidgets", cloudT("noFavoriteWidgets"))
+            : accountSignedIn()
+              ? savedT("savedEmptyIn", "No favorite Canvases or Widgets yet.")
+              : savedT("savedEmptyOut", "No local favorite Widgets yet. Sign in to see Cloud favorites.");
       rows.push(el("p", { class:"crafts-empty", text:craftsPager?.error?.message || emptyText }));
     }
     const removeFromCache = (key) => {
       if (craftsPager) {
-        craftsPager.locals = craftsPager.locals.filter((entry) => `widget:${entry.artifactSha256}` !== key);
+        craftsPager.locals = craftsPager.locals.filter((entry) => privateFavoriteCraftKey(entry) !== key);
         craftsPager.remote = craftsPager.remote.filter((entry) => entry.key !== key);
         renderCraftsList(favoritePagerEntries(craftsPager));
       }
       void refreshCraftsList({ reset:true });
     };
     rows.push(...visibleEntries.map((entry) => craftsRow(entry, removeFromCache)));
-    if (craftsPager && favoritePagerHasMore(craftsPager)) {
-      const more = el("button", {
-        class:"cloud-button crafts-load-more",
+    if (craftsPager?.error) {
+      const retry = el("button", {
+        class:"cloud-button crafts-retry",
         type:"button",
-        disabled:Boolean(craftsPager.loading),
-        text:craftsPager.loading ? cloudT("loadingFavorites") : craftsPager.error ? cloudT("retryFavorites") : cloudT("loadMoreFavorites"),
-        onclick:() => void refreshCraftsList(),
+        text:cloudT("retryFavorites"),
       });
-      rows.push(more);
-      craftsObserver = observeFavoritePagerSentinel(more, craftsList, () => refreshCraftsList());
+      retry.addEventListener("click", () => {
+        if (retry.disabled) return;
+        retry.disabled = true;
+        void refreshCraftsList({ reset:true });
+      });
+      rows.push(el("div", { class:"crafts-retry-row", role:"status" }, [retry]));
+    } else if (craftsPager && favoritePagerHasMore(craftsPager)) {
+      const sentinel = el("div", { class:"crafts-page-sentinel", "aria-hidden":"true" });
+      rows.push(sentinel);
+      if (!craftsPager.loading) craftsObserver = observeFavoritePagerSentinel(sentinel, craftsList, () => refreshCraftsList());
     }
     craftsList.replaceChildren(...rows);
   }
@@ -2060,6 +2488,8 @@
     craftsPager = favoritePagerForKind(selectedCraftKind);
     setCraftsOpen(true);
     updateCraftFilterTabs();
+    updateCraftView();
+    updateCraftsEchoesLink();
     if (favoritePagerEntries(craftsPager).length) renderCraftsList(favoritePagerEntries(craftsPager));
     else craftsList.replaceChildren(el("p", { class:"crafts-empty", text:savedT("savedLoading", "Loading favorites…") }));
     void refreshCraftsList({ reset:true });
@@ -2068,7 +2498,26 @@
   craftsButton?.addEventListener("click", openCrafts);
   craftsClose?.addEventListener("click", () => setCraftsOpen(false));
   craftsPopover?.addEventListener("mousedown", (event) => { if (event.target === craftsPopover) setCraftsOpen(false); });
-  document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !craftsPopover?.hidden) setCraftsOpen(false); });
+  document.addEventListener("keydown", (event) => {
+    if (craftsPopover?.hidden) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setCraftsOpen(false);
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const dialog = craftsPopover.querySelector?.(".crafts-modal");
+    if (!dialog) return;
+    const focusable = focusableElements(dialog);
+    if (!focusable.length) {
+      event.preventDefault();
+      dialog.focus();
+      return;
+    }
+    const first = focusable[0], last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  });
   window.addEventListener("penecho:languagechange", () => {
     updateCloudButton();
     const overlay = document.querySelector(".penecho-cloud-overlay");
@@ -2100,7 +2549,13 @@
     let completed = false;
     try {
       await refreshStatus();
-      await toggleWidgetFavorite(widgetId);
+      await toggleWidgetFavorite(widgetId, {
+        favorite:event.detail?.favorite === true,
+        favoriteArtifactSha256:event.detail?.favoriteArtifactSha256,
+        sourceWidgetId:event.detail?.sourceWidgetId,
+        favoriteCloudId:event.detail?.favoriteCloudId,
+        favoriteCommunityItemId:event.detail?.favoriteCommunityItemId,
+      });
       completed = true;
     } catch (error) {
       window.alert(error?.message || savedT("savedErrorToggle", "Could not update this favorite."));

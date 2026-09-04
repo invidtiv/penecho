@@ -8,6 +8,7 @@ const vm = require("node:vm");
 
 const ROOT = path.resolve(__dirname, ".."),
   source = fs.readFileSync(path.join(ROOT, "public", "plugins.js"), "utf8"),
+  canvasRuntime = fs.readFileSync(path.join(ROOT, "src", "client", "app", "canvas-runtime.js"), "utf8"),
   pluginDirectory = path.join(ROOT, "public", "plugins"),
   pluginFiles = fs.readdirSync(pluginDirectory).filter((file) => file.endsWith(".md")).sort(),
   pluginBundles = fs.readdirSync(pluginDirectory, { withFileTypes:true })
@@ -18,6 +19,76 @@ const ROOT = path.resolve(__dirname, ".."),
   context = { window:{}, URL };
 vm.runInNewContext(source, context);
 const plugins = context.window.PENECHO_PLUGINS;
+
+test("Cloud General HTML widgets request browser-direct public HTTPS access", () => {
+  assert.match(canvasRuntime, /runtime === "cloud" && manifest\.id === "general"[\s\S]*?url\.searchParams\.set\("public-https", "1"\)/);
+});
+
+test("strict Widget snapshot preparation preserves the original capture error", async () => {
+  const debugEvents = [], snapshotError = Error("Widget snapshot timed out"),
+    prepare = vm.runInNewContext(`(async ${functionSource(canvasRuntime, "prepareVisibleWidgetSnapshots")})`, {
+      capturableWidgets:() => [{ id:"widget-science", snapshotImage:null }],
+      requestWidgetSnapshot:async () => { throw snapshotError; },
+      widgetSnapshotAbortError:() => Error("aborted"),
+      WIDGET_SNAPSHOT_TIMEOUT_MS:20_000,
+      WIDGET_HISTORY_SNAPSHOT_WAIT_MS:3_000,
+      debug:(...args) => debugEvents.push(args),
+      setTimeout:() => 0,
+    });
+  await assert.rejects(prepare(null, false), /Widget snapshot timed out/);
+  assert.equal(debugEvents.length, 0, "strict capture failures are not relabeled as a degraded preview");
+  assert.deepEqual(JSON.parse(JSON.stringify(await prepare(null, true))), { total:1, captured:0, missing:1 });
+  assert.equal(debugEvents[0][0], "widget-snapshot-degraded");
+});
+
+test("Widget snapshot errors retain the host-provided failure detail", () => {
+  assert.match(functionSource(canvasRuntime, "handleWidgetMessage"), /snapshotFailure = message\.type === "penecho-widget-snapshot-error"[\s\S]*?String\(message\.error[\s\S]*?pending\.reject\(Error\(snapshotFailure\)\)/);
+  assert.match(functionSource(canvasRuntime, "requestWidgetSnapshot"), /reject\(Error\("Widget snapshot timed out"\)\)/);
+});
+
+test("Widget renderer uses the Cloud-injected content version and safely falls back for static hosts", () => {
+  const host = fs.readFileSync(path.join(ROOT, "public", "widget-host.js"), "utf8"),
+    hostDocument = fs.readFileSync(path.join(ROOT, "public", "widget-host.html"), "utf8"),
+    rendererUrl = (content) => vm.runInNewContext(`(${functionSource(host, "widgetRendererUrl")})()`, {
+      document:{ querySelector() { return { getAttribute() { return content; } }; } },
+      location:{ href:"https://internaltest.penecho.ai/canvas/widget-host.html?remote-canvas=1" },
+      URL,
+    });
+
+  assert.match(hostDocument, /<meta name="penecho-widget-renderer-version" content="__PENECHO_WIDGET_RENDERER_VERSION__">/);
+  assert.equal(rendererUrl("7ad87c9d20a4"), "https://internaltest.penecho.ai/canvas/widget-renderer.js?v=7ad87c9d20a4");
+  assert.equal(rendererUrl("__PENECHO_WIDGET_RENDERER_VERSION__"), "https://internaltest.penecho.ai/canvas/widget-renderer.js");
+  assert.equal(rendererUrl("7ad87c9d20a4&unsafe=1"), "https://internaltest.penecho.ai/canvas/widget-renderer.js");
+});
+
+test("the initial Widget frame load preserves an early host-ready handshake while a real reload resets it", () => {
+  const updateForLoad = vm.runInNewContext(`(${functionSource(canvasRuntime, "updateWidgetHostForFrameLoad")})`),
+    initialPromise = {},
+    initialResolver = () => {},
+    widget = {
+      initialized:true,
+      hostReady:true,
+      hostStateKey:"ready",
+      hostReadyPromise:initialPromise,
+      resolveHostReady:initialResolver,
+    },
+    loadState = { observed:false };
+
+  assert.equal(updateForLoad(widget, loadState), false, "the first load belongs to the initial handshake");
+  assert.equal(widget.initialized, true);
+  assert.equal(widget.hostReady, true);
+  assert.equal(widget.hostStateKey, "ready");
+  assert.equal(widget.hostReadyPromise, initialPromise);
+  assert.equal(widget.resolveHostReady, initialResolver);
+
+  assert.equal(updateForLoad(widget, loadState), true, "a later load represents a new host document");
+  assert.equal(widget.initialized, false);
+  assert.equal(widget.hostReady, false);
+  assert.equal(widget.hostStateKey, null);
+  assert.notEqual(widget.hostReadyPromise, initialPromise);
+  assert.equal(typeof widget.hostReadyPromise.then, "function");
+  assert.equal(typeof widget.resolveHostReady, "function");
+});
 
 function functionSource(input, name) {
   const start = input.indexOf(`function ${name}(`), body = input.indexOf("{", start);
@@ -579,7 +650,7 @@ test("widget host keeps generated HTML in an opaque inner frame and snapshots it
   assert.ok(host.indexOf("pluginStyle.textContent = pluginStyles") < host.indexOf('bridgeStyle.textContent = "html,body'));
   assert.match(server, /path\.join\(PUBLIC, "vendor", "penecho-dom-renderer\.js"\)/);
   assert.match(server, /url\.pathname === "\/widget-renderer\.js"[\s\S]*?Cross-Origin-Resource-Policy":"cross-origin"/);
-  assert.match(snapshot, /domSnapshotRenderer = globalThis\.html2canvas[\s\S]*?domSnapshotRenderer\(document\.documentElement/);
+  assert.match(snapshot, /domSnapshotRenderer = typeof globalThis\.html2canvas === "function"[\s\S]*?await loadSnapshotRenderer\(Math\.min\(8000, timeoutMs\)\)[\s\S]*?domSnapshotRenderer\(document\.documentElement/);
   assert.doesNotMatch(snapshot, /\bfetch\s*\(|proxyPublicFetch|PUBLIC_FETCH|notifyReady|penecho-widget-updated/);
   assert.match(host, /snapshotPrimarySvg\(requestedWidth, requestedHeight, scale\)/);
   assert.match(host, /HIGH_RESOLUTION_SNAPSHOT_SCALE = 1\.5,[\s\S]*?MAX_HIGH_RESOLUTION_SNAPSHOT_DIMENSION = 3600,[\s\S]*?MAX_HIGH_RESOLUTION_SNAPSHOT_PIXELS = 10800000/);
@@ -616,6 +687,11 @@ test("widget host keeps generated HTML in an opaque inner frame and snapshots it
   assert.match(rendererLicense, /Copyright \(c\) 2012 Niklas von Hertzen/);
   assert.match(rendererLicense, /Permission is hereby granted, free of charge/);
   assert.match(host, /MAX_SNAPSHOT_DATA_URL_LENGTH/);
+  assert.match(host, /snapshotDebugEnabled = remoteCanvas[\s\S]*?parent\.location\.href[\s\S]*?widget-snapshot-debug/);
+  assert.match(host, /console\.info\("\[WSNAP\]"/);
+  assert.match(host, /runtime-installed[\s\S]*?renderer-marker[\s\S]*?document-ready-marker/);
+  for (const stage of ["snapshot-host-received", "snapshot-forwarded", "snapshot-host-success"]) assert.match(host, new RegExp(stage));
+  assert.doesNotMatch(functionSource(host, "snapshotDebugLog"), /message\.html|dataUrl/);
   assert.match(host, /setTimeout\(\(\) => snapshotError\(message\.requestId, "Widget snapshot timed out"\), timeoutMs\)/);
   assert.match(host, /withTimeout\(render\(\), timeoutMs,[\s\S]*?captureExpired = true/);
   assert.match(host, /penecho-widget-document-ready" && message\.runtimeVersion === runtimeVersion[\s\S]*?innerDocumentReady = true;[\s\S]*?penecho-widget-capture-ready[\s\S]*?forwardSnapshotRequest/);
@@ -665,7 +741,7 @@ test("widget host keeps generated HTML in an opaque inner frame and snapshots it
   assert.doesNotMatch(host, /setTimeout\(\(\) => activateHold/);
   assert.doesNotMatch(host, /controls\[0\]\?\.hit \|\| "move"/);
   assert.match(host, /touchCount\(\) >= 2[\s\S]*?cancelAllHoldsForNavigation/);
-  assert.match(host, /hit:"resize"[\s\S]*?hit:"width"[\s\S]*?hit:"height"/);
+  assert.match(functionSource(host, "controlHit"), /return "resize"[\s\S]*?return "width"[\s\S]*?return "height"/);
   assert.match(host, /penecho-widget-state/);
   assert.match(host, /function setRuntimeActive\(active\)/);
   assert.doesNotMatch(snapshot, /setRuntimeActive|notifyVisibleViewport/);
@@ -729,6 +805,45 @@ test("widget snapshots wait for one presented frame without pausing the live run
   const presented = settle();
   frameCallback();
   assert.equal(await presented, true);
+});
+
+test("widget snapshots can reload the DOM renderer after an interrupted initial request", async () => {
+  const host = fs.readFileSync(path.join(ROOT, "public", "widget-host.js"), "utf8"),
+    scripts = [], timers = new Map(), runtimeGlobal = {},
+    document = {
+      createElement(tag) {
+        assert.equal(tag, "script");
+        return { remove() { this.removed = true; } };
+      },
+      head:{ append(script) { scripts.push(script); } },
+    };
+  let nextTimer = 0;
+  const load = vm.runInNewContext(`(() => {
+    let rendererLoadPromise = null;
+    const domRendererUrl = "https://canvas.example/widget-renderer.js";
+    const snapshotDebugLog = () => {};
+    ${functionSource(host, "loadSnapshotRenderer")}
+    return loadSnapshotRenderer;
+  })()`, {
+    document,
+    globalThis:runtimeGlobal,
+    setTimeout(callback) { const id = ++nextTimer; timers.set(id, callback); return id; },
+    clearTimeout(id) { timers.delete(id); },
+  });
+  const first = load(2000);
+  assert.equal(scripts.length, 1);
+  assert.equal(scripts[0].src, "https://canvas.example/widget-renderer.js");
+  scripts[0].onerror();
+  await assert.rejects(first, /Widget renderer failed to load/);
+  assert.equal(scripts[0].removed, true);
+
+  const renderer = () => {};
+  const second = load(2000);
+  assert.equal(scripts.length, 2, "a failed load is not cached for the rest of the page lifetime");
+  runtimeGlobal.html2canvas = renderer;
+  scripts[1].onload();
+  assert.equal(await second, renderer);
+  assert.equal(timers.size, 0);
 });
 
 test("direct widget snapshots restore live style mutations before rendering continues", () => {
@@ -846,8 +961,8 @@ test("widget iframe preserves native navigation while forwarding only focus and 
   assert.deepEqual(interactionMessages(selected).map((message) => message.type), ["penecho-widget-activate"]);
 
   for (const [hit, point] of Object.entries({
-    width:{ clientX:995, clientY:300, screenX:995, screenY:300 },
-    height:{ clientX:500, clientY:595, screenX:500, screenY:595 },
+    width:{ clientX:995, clientY:50, screenX:995, screenY:50 },
+    height:{ clientX:50, clientY:595, screenX:50, screenY:595 },
     resize:{ clientX:995, clientY:595, screenX:995, screenY:595 },
   })) {
     const control = widgetRuntimeHarness();
@@ -856,6 +971,17 @@ test("widget iframe preserves native navigation while forwarding only focus and 
     assert.equal(control.messages.at(-1).type, "penecho-widget-drag-start");
     assert.equal(control.messages.at(-1).hit, hit);
   }
+
+  const cursors = widgetRuntimeHarness();
+  cursors.select();
+  cursors.pointer("pointermove", { pointerType:"pen", clientX:995, clientY:50 });
+  assert.equal(cursors.classes.has("penecho-widget-resize-width"), true);
+  cursors.pointer("pointermove", { pointerType:"pen", clientX:50, clientY:595 });
+  assert.equal(cursors.classes.has("penecho-widget-resize-width"), false);
+  assert.equal(cursors.classes.has("penecho-widget-resize-height"), true);
+  cursors.pointer("pointermove", { pointerType:"pen", clientX:995, clientY:595 });
+  assert.equal(cursors.classes.has("penecho-widget-resize-height"), false);
+  assert.equal(cursors.classes.has("penecho-widget-resize-corner"), true);
 
   const pinch = widgetRuntimeHarness();
   pinch.pointer("pointerdown", { pointerId:1 });
@@ -919,6 +1045,10 @@ test("plugin catalog paths accept PenEcho Cloud content-version suffixes", () =>
   assert.equal(validate("plugins/general/plugin.md?x=1734dd52572c", "md"), null);
   assert.equal(validate("https://evil.example/plugins/general/plugin.md", "md"), null);
   assert.equal(validate("plugins/../secret.md", "md"), null);
+  const cacheMode = vm.runInNewContext(`(${functionSource(app, "pluginDocumentCacheMode")})`, {});
+  assert.equal(cacheMode("plugins/general/plugin.md?v=1734dd52572c", true), "force-cache");
+  assert.equal(cacheMode("plugins/general/plugin.md", true), "no-store");
+  assert.equal(cacheMode("plugins/private/my-widget/plugin.md?v=abc123def456", false), "no-store");
 });
 
 test("cloud community deep links load plugin assets from the Canvas root", () => {
@@ -937,4 +1067,5 @@ test("cloud community deep links load plugin assets from the Canvas root", () =>
   assert.doesNotMatch(documentUrl, /\/canvas\/community\/plugins\//);
   assert.match(loadPluginDocuments, /fetch\(canvasAssetUrl\(documentPath\)/);
   assert.match(loadPluginDocuments, /stylePath \? fetch\(canvasAssetUrl\(stylePath\)/);
+  assert.match(loadPluginDocuments, /inlineDocument !== null[\s\S]*?PLUGINS\?\.parse\(inlineDocument, inlineStyles\)/);
 });

@@ -81,7 +81,8 @@ test("Canvas viewer restores the published bundle in memory without importing it
   assert.match(viewerRestore, /decodeSnapshotTilesInBatches/);
   assert.match(viewerRestore, /decodeSnapshotImagesInBatches/);
   assert.match(viewerRestore, /restoreWidgets\(item\.widgets\)/);
-  assert.match(viewerRestore, /restoreTextBoxes\(item\.textBoxes\)/);
+  assert.match(viewerRestore, /await restoreTextBoxes\(item\.textBoxes, 1\)/);
+  assert.match(viewerRestore, /void refreshVisibleTextBoxQuality\(\)/);
   assert.match(viewerRestore, /fitViewerCanvas\(\)/);
   assert.doesNotMatch(viewerRestore, /saveDeviceSnapshot\(/);
   assert.doesNotMatch(viewerRestore, /refreshSnapshots\(/);
@@ -111,6 +112,19 @@ test("the viewer controls stay quiet until hovered or focused", () => {
   assert.match(css, /\.viewer-actions\s*\{[\s\S]*?opacity:\s*\.5/);
   assert.match(css, /\.viewer-brand:hover\s*\{\s*opacity:\s*1/);
   assert.match(css, /\.viewer-actions:hover,[\s\S]*?\.viewer-actions:focus-within\s*\{\s*opacity:\s*1/);
+});
+
+test("the viewer removes edit guidance, the canvas seam, and the duplicate action border", () => {
+  const css = read("public/viewer.css");
+
+  assert.match(
+    css,
+    /html\.viewer-mode #canvasWelcome,[\s\S]*?html\.viewer-mode \.canvas-frame::after\s*\{\s*display:\s*none !important;/,
+  );
+  assert.match(
+    css,
+    /\.viewer-actions\s*\{[^}]*padding:\s*0;[^}]*border:\s*0;[^}]*border-radius:\s*0;[^}]*background:\s*transparent;[^}]*box-shadow:\s*none;/,
+  );
 });
 
 test("Widget hosts stay same-origin in Viewer and Cloud while the local app keeps loopback isolation", (t) => {
@@ -224,7 +238,7 @@ test("Viewer Widget initialization recovers when the host's first ready message 
       ${functionSource(host, "announceWidgetHostReady")}
       ${functionSource(host, "respondToWidgetHostProbe")}
       return respondToWidgetHostProbe;
-    })()`, { parent:parentWindow, parentOrigin:origin });
+    })()`, { parent:parentWindow, parentOrigin:origin, snapshotDebugLog() {} });
   assert.equal(hostHandshake({ source:parentWindow, origin:"http://localhost:18082", data:{ type:"penecho-widget-host-probe" } }), false);
   assert.equal(sentToParent.length, 0);
   assert.equal(hostHandshake({ source:parentWindow, origin, data:{ type:"penecho-widget-host-probe" } }), true);
@@ -266,12 +280,14 @@ test("Viewer fit produces visible transforms for a multi-Widget Canvas", () => {
       return { x, y, w:maxX - x, h:maxY - y };
     },
     widgetBounds = () => widgets.reduce((bounds, widget) => unionLocalBounds(bounds, widget), null),
-    layer = {},
+    layer = {}, carrierProperties = new Map(),
     runtime = vm.runInNewContext(`(() => {
+      let canvasWidgetCarrierPanX = Number.NaN, canvasWidgetCarrierPanY = Number.NaN;
       ${functionSource(canvas, "fit")}
       ${functionSource(canvas, "updateWidgetRenderVisibility")}
+      ${functionSource(canvas, "syncCanvasWidgetCarrier")}
       ${functionSource(canvas, "positionWidget")}
-      return { fit, positionWidget };
+      return { fit, positionWidget, syncCanvasWidgetCarrier };
     })()`, {
       SIZE:20000,
       INITIAL_VIEW_ZOOM:1.5,
@@ -283,8 +299,12 @@ test("Viewer fit produces visible transforms for a multi-Widget Canvas", () => {
       animationLayer:{},
       placedContentLayer:{},
       inkLayer:{},
+      liveInkLayer:{},
       interactionLayer:layer,
       devicePixelRatio:1,
+      invalidateCanvasViewportMetrics() {},
+      canvasViewportMetrics:() => ({ rect, width:view.clientWidth, height:view.clientHeight, clientScaleX:1, clientScaleY:1 }),
+      pageLayoutRect:(element) => element === view ? rect : element.getBoundingClientRect(),
       visibleInkBounds:() => null,
       imageBounds:() => null,
       textBoxBounds:() => null,
@@ -292,21 +312,33 @@ test("Viewer fit produces visible transforms for a multi-Widget Canvas", () => {
       widgetBounds,
       unionLocalBounds,
       document:{ querySelector:() => ({ getBoundingClientRect:() => ({ bottom:56 }) }) },
+      scheduleLiveInkLayerWarmup() {},
       updateCoordinates() {},
       requestRender() {},
+      runtimeElementStyle:() => ({ setProperty:(name,value) => carrierProperties.set(name,value) }),
       sendWidgetInit() {},
       sendWidgetHostState() {},
     });
 
   runtime.fit();
+  runtime.syncCanvasWidgetCarrier();
   assert.ok(state.scale > .5 && state.scale < .54);
   for (const widget of widgets) runtime.positionWidget(widget);
   assert.equal(widgets[0].renderActive, true);
   assert.equal(widgets[1].renderActive, true);
   assert.equal(widgets[0].classes.has("widget-offscreen"), false);
   assert.equal(widgets[1].classes.has("widget-offscreen"), false);
-  assert.match(widgets[0].styleRule.style.transform, /^translate3d\(40(?:\.0+)?px,1\d\d(?:\.\d+)?px,0\) scale\(0\.5/);
-  assert.match(widgets[1].styleRule.style.transform, /^translate3d\(7\d\d(?:\.\d+)?px,3\d\d(?:\.\d+)?px,0\) scale\(0\.5/);
+  const carrierX = Number.parseFloat(carrierProperties.get("--canvas-widget-pan-x")),
+    carrierY = Number.parseFloat(carrierProperties.get("--canvas-widget-pan-y")),
+    visibleOrigin = (widget) => {
+      const match = /^translate3d\(([-\d.]+)px,([-\d.]+)px,0\)/.exec(widget.styleRule.style.transform);
+      return { x:carrierX + Number(match?.[1]), y:carrierY + Number(match?.[2]) };
+    };
+  assert.ok(Number.isFinite(carrierX) && Number.isFinite(carrierY));
+  assert.deepEqual(visibleOrigin(widgets[0]), { x:state.panX + widgets[0].x * state.scale, y:state.panY + widgets[0].y * state.scale });
+  assert.deepEqual(visibleOrigin(widgets[1]), { x:state.panX + widgets[1].x * state.scale, y:state.panY + widgets[1].y * state.scale });
+  assert.match(widgets[0].styleRule.style.transform, /^translate3d\(5\d\d(?:\.\d+)?px,1\d\d\d(?:\.\d+)?px,0\) scale\(0\.5/);
+  assert.match(widgets[1].styleRule.style.transform, /^translate3d\(1\d\d\d(?:\.\d+)?px,1\d\d\d(?:\.\d+)?px,0\) scale\(0\.5/);
   assert.equal(widgets[0].styleRule.style.width, "600px");
   assert.equal(widgets[1].styleRule.style.height, "600px");
 

@@ -82,6 +82,91 @@
   function textBoxBox(item) {
     return { x:item.x, y:item.y, w:item.w, h:item.h };
   }
+  function textImageContentInset(image) {
+    const x = Number(image?.contentInsetX),
+      y = Number(image?.contentInsetY);
+    return {
+      x:Number.isFinite(x) ? x : 2,
+      y:Number.isFinite(y) ? y : 2,
+    };
+  }
+  let canvasTextQualityGeneration = 0;
+  function textRasterPixels(image) {
+    const width = Number(image?.width), height = Number(image?.height);
+    return Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0 ? width * height : 0;
+  }
+  function textImageRasterRatio(image) {
+    const logicalWidth = Number(image?.logicalWidth), logicalHeight = Number(image?.logicalHeight),
+      widthRatio = logicalWidth > 0 ? Number(image?.width) / logicalWidth : 0,
+      heightRatio = logicalHeight > 0 ? Number(image?.height) / logicalHeight : 0;
+    if (widthRatio > 0 && heightRatio > 0) return Math.min(widthRatio, heightRatio);
+    return Math.max(widthRatio, heightRatio, 1);
+  }
+  function textRasterExtraPixels(item, image = item?.image) {
+    const logicalWidth = Math.max(1, Number(image?.logicalWidth) || Number(item?.w) || 1),
+      logicalHeight = Math.max(1, Number(image?.logicalHeight) || Number(item?.h) || 1);
+    return Math.max(0, textRasterPixels(image) - logicalWidth * logicalHeight);
+  }
+  function desiredCanvasTextRasterRatio(scale = state.scale) {
+    return Math.min(3, Math.max(1, (devicePixelRatio || 1) * Math.max(1, Number(scale) || 1)));
+  }
+  function textRasterRatioForBudget(item, targetRatio, remainingPixels) {
+    const currentRatio = textImageRasterRatio(item?.image),
+      currentPixels = textRasterPixels(item?.image),
+      logicalPixels = Math.max(1, Number(item?.w) * Number(item?.h)),
+      affordablePixels = Math.min(MAX_SHARP_OVERLAY_ITEM_PIXELS, currentPixels + Math.max(0, Number(remainingPixels) || 0)),
+      affordableRatio = Math.sqrt(affordablePixels / logicalPixels);
+    return Math.min(targetRatio, affordableRatio) > currentRatio * 1.05 ? Math.min(targetRatio, affordableRatio) : currentRatio;
+  }
+  function releaseTextRaster(image) {
+    if (image?.tagName === "CANVAS") image.width = image.height = 1;
+  }
+  async function renderTextBoxImage(item, pixelRatio = desiredCanvasTextRasterRatio()) {
+    const fontFamily = normalizeTextBoxFontFamily(item.fontFamily),
+      color = item.color || state.inkColor;
+    try {
+      return { image:await mixedTextImage(item.text, item.fontSize, color, item.maxWidth, 1.35, fontFamily, pixelRatio), mixedFallback:false };
+    } catch {
+      return { image:textImage(item.text, item.fontSize, color, item.maxWidth, 1.35, fontFamily, TEXT_INPUT_MAX_LENGTH, pixelRatio), mixedFallback:true };
+    }
+  }
+  async function refreshVisibleTextBoxQuality() {
+    const generation = ++canvasTextQualityGeneration;
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    if (generation !== canvasTextQualityGeneration || view.classList.contains("canvas-navigation-previewing")) return false;
+    const targetRatio = desiredCanvasTextRasterRatio(),
+      visible = canvasRenderRegion().visible,
+      candidates = visible.w > 0 && visible.h > 0 ? visibleTextBoxes(visible) : [],
+      retainedExtraPixels = state.textBoxes.reduce((sum, item) => sum + textRasterExtraPixels(item), 0);
+    let remainingPixels = Math.max(0, MAX_SHARP_OVERLAY_PIXELS - state.sharpOverlayPixels - retainedExtraPixels),
+      changed = false;
+    for (const item of candidates) {
+      if (generation !== canvasTextQualityGeneration) return false;
+      const currentImage = item.image,
+        requestedRatio = textRasterRatioForBudget(item, targetRatio, remainingPixels);
+      if (requestedRatio <= textImageRasterRatio(currentImage) * 1.05) continue;
+      let rendered;
+      try { rendered = await renderTextBoxImage(item, requestedRatio); }
+      catch { continue; }
+      const image = rendered.image,
+        renderedRatio = textImageRasterRatio(image),
+        renderedPixels = textRasterPixels(image),
+        additionalPixels = Math.max(0, textRasterExtraPixels(item, image) - textRasterExtraPixels(item, currentImage));
+      if (generation !== canvasTextQualityGeneration || !state.textBoxes.includes(item) || item.image !== currentImage
+        || renderedRatio <= textImageRasterRatio(currentImage) * 1.05 || renderedPixels > MAX_SHARP_OVERLAY_ITEM_PIXELS
+        || additionalPixels > remainingPixels) {
+        releaseTextRaster(image);
+        if (generation !== canvasTextQualityGeneration) return false;
+        continue;
+      }
+      item.image = image;
+      remainingPixels -= additionalPixels;
+      changed = true;
+    }
+    if (generation !== canvasTextQualityGeneration || !changed) return false;
+    renderPlacedContentLayer(canvasRenderRegion().visible);
+    return true;
+  }
   function textBoxHistoryRecord(item) {
     return {
       id:item.id,
@@ -91,6 +176,7 @@
       h:item.h,
       maxWidth:item.maxWidth,
       fontSize:item.fontSize,
+      fontFamily:item.fontFamily,
       color:item.color,
       text:item.text,
       image:item.image,
@@ -124,13 +210,10 @@
     }
     return null;
   }
-  async function fittedTextBoxContent(text, fontSize, color, maxWidth) {
+  async function fittedTextBoxContent(text, fontSize, color, maxWidth, fontFamily = TEXT_EDITOR_FONT_FAMILY, pixelRatio = desiredCanvasTextRasterRatio()) {
+    fontFamily = normalizeTextBoxFontFamily(fontFamily);
     const render = async () => {
-      try {
-        return { image:await mixedTextImage(text, fontSize, color, maxWidth, 1.35, TEXT_EDITOR_FONT_FAMILY), mixedFallback:false };
-      } catch {
-        return { image:textImage(text, fontSize, color, maxWidth, 1.35, TEXT_EDITOR_FONT_FAMILY, TEXT_INPUT_MAX_LENGTH), mixedFallback:true };
-      }
+      return renderTextBoxImage({ text, fontSize, color, maxWidth, fontFamily }, pixelRatio);
     };
     maxWidth = Math.min(SIZE, Math.max(fontSize * 3, maxWidth));
     let result = await render(),
@@ -146,13 +229,14 @@
     }
     return {
       ...result,
+      fontFamily,
       fontSize,
       maxWidth,
       width:Math.min(SIZE, width),
       height:Math.min(SIZE, height),
     };
   }
-  async function renderedTextBoxRecord(item) {
+  async function renderedTextBoxRecord(item, pixelRatio = desiredCanvasTextRasterRatio()) {
     if (!item || typeof item !== "object" || typeof item.text !== "string" || !item.text.trim() || item.text.length > TEXT_INPUT_MAX_LENGTH) return null;
     const x = Number(item.x),
       y = Number(item.y),
@@ -160,7 +244,7 @@
       maxWidth = Number(item.maxWidth);
     if (![x, y, fontSize, maxWidth].every(Number.isFinite) || x < 0 || y < 0 || fontSize < 1 || fontSize > 2000 || maxWidth < fontSize * 3 || maxWidth > SIZE) return null;
     const color = item.color || state.inkColor,
-      fitted = await fittedTextBoxContent(item.text, fontSize, color, maxWidth),
+      fitted = await fittedTextBoxContent(item.text, fontSize, color, maxWidth, item.fontFamily, pixelRatio),
       width = fitted.width,
       height = fitted.height,
       fittedX = Math.max(0, Math.min(SIZE - width, x)),
@@ -174,12 +258,14 @@
       h:height,
       maxWidth:fitted.maxWidth,
       fontSize:fitted.fontSize,
+      fontFamily:fitted.fontFamily,
       color:typeof item.color === "string" ? item.color : color,
       text:item.text,
       image:fitted.image,
     };
   }
-  async function restoreTextBoxes(items) {
+  async function restoreTextBoxes(items, pixelRatio = 1) {
+    canvasTextQualityGeneration++;
     clearHandToolbarTargets("text-box");
     clearTextEditors();
     state.textBoxes = [];
@@ -188,8 +274,8 @@
     for (const item of Array.isArray(items) ? items.slice(0, MAX_VISIBLE_TEXT_BOXES) : []) {
       let record = null;
       try {
-        if (item?.image) record = textBoxHistoryRecord(item);
-        else record = await renderedTextBoxRecord(item);
+        if (item?.image && textImageRasterRatio(item.image) >= pixelRatio / 1.05) record = textBoxHistoryRecord(item);
+        else record = await renderedTextBoxRecord(item, pixelRatio);
       } catch {
         // One invalid or unsupported text box must not make an otherwise valid
         // saved Canvas impossible to restore.
@@ -202,6 +288,7 @@
     }
     positionTextEditors();
     requestRender();
+    void refreshVisibleTextBoxQuality();
   }
 
   function imageBox(item) {
@@ -222,6 +309,7 @@
       sourceName:item.sourceName,
       blob:item.blob,
       image:item.image,
+      ...(item.plotExpression ? { plotExpression:item.plotExpression } : {}),
     };
   }
   function storedImageRecord(item) {
@@ -235,13 +323,16 @@
       naturalH:item.naturalH,
       sourceName:item.sourceName,
       blob:item.blob,
+      ...(item.plotExpression ? { plotExpression:item.plotExpression } : {}),
     };
   }
   function imageRecord(item) {
     if (!item || typeof item !== "object" || !(item.blob instanceof Blob) || !item.image || item.blob.size <= 0 || item.blob.size > MAX_IMAGE_SOURCE_BYTES) return null;
     if (!n(item.x) || !n(item.y) || !n(item.w, 80) || !n(item.h, 80) || item.x + item.w > SIZE || item.y + item.h > SIZE) return null;
     const naturalW = Number(item.naturalW) || item.image.naturalWidth || item.image.width,
-      naturalH = Number(item.naturalH) || item.image.naturalHeight || item.image.height;
+      naturalH = Number(item.naturalH) || item.image.naturalHeight || item.image.height,
+      plotExpression = typeof item.plotExpression === "string" ? item.plotExpression.trim() : "";
+    if (item.plotExpression !== undefined && (!plotExpression || plotExpression.length > 180)) return null;
     if (!n(naturalW, 1, MAX_IMAGE_DIMENSION) || !n(naturalH, 1, MAX_IMAGE_DIMENSION) || naturalW * naturalH > MAX_IMAGE_PIXELS) return null;
     return {
       id:typeof item.id === "string" && /^image-\d+$/.test(item.id) ? item.id : `image-${state.nextImageId++}`,
@@ -254,6 +345,7 @@
       sourceName:typeof item.sourceName === "string" ? item.sourceName.trim().slice(0, 160) : "",
       blob:item.blob,
       image:item.image,
+      ...(plotExpression ? { plotExpression } : {}),
     };
   }
   function imageHistoryState() {
@@ -264,6 +356,73 @@
   }
   function recordImagesBefore() {
     if (!state.imageHistoryBefore) state.imageHistoryBefore = imageHistoryState();
+  }
+  function syncCanvasObjectLayerOrder() {
+    const widgetInFront = state.frontCanvasObjectKind === "widget",
+      selectedWidgetMaterialActive = Boolean(selectedWidgetMaterial && !selectedWidgetMaterial.hidden),
+      widgetStyle = runtimeElementStyle(widgetLayer, "widget-layer-stack"),
+      imageMaterialStyle = runtimeElementStyle(imageMaterialLayer, "image-material-layer-stack"),
+      imageStyle = runtimeElementStyle(placedContentLayer, "placed-content-layer-stack"),
+      textEditorStyle = runtimeElementStyle(textEditorLayer, "text-editor-layer-stack");
+    if (widgetStyle) widgetStyle.zIndex = selectedWidgetMaterialActive ? "3" : widgetInFront ? "2" : "1";
+    if (imageMaterialStyle) imageMaterialStyle.zIndex = widgetInFront ? "1" : "2";
+    if (imageStyle) imageStyle.zIndex = widgetInFront ? "1" : "2";
+    if (textEditorStyle) textEditorStyle.setProperty("--text-editor-layer-z", state.frontCanvasObjectKind === "text-box" ? "6" : "1");
+  }
+  function setCanvasObjectFrontKind(kind) {
+    if (!["image", "widget", "text-box"].includes(kind)) return false;
+    const frontChanged = state.frontCanvasObjectKind !== kind,
+      placedChanged = ["image", "text-box"].includes(kind) && state.frontPlacedCanvasObjectKind !== kind;
+    if (!frontChanged && !placedChanged) return false;
+    state.frontCanvasObjectKind = kind;
+    if (["image", "text-box"].includes(kind)) state.frontPlacedCanvasObjectKind = kind;
+    syncCanvasObjectLayerOrder();
+    return true;
+  }
+  function restoreCanvasObjectFrontKinds(frontKind, placedKind) {
+    const nextPlacedKind = ["image", "text-box"].includes(placedKind) ? placedKind : "image",
+      nextFrontKind = ["image", "widget", "text-box"].includes(frontKind) ? frontKind : nextPlacedKind,
+      changed = state.frontCanvasObjectKind !== nextFrontKind || state.frontPlacedCanvasObjectKind !== nextPlacedKind;
+    if (!changed) return false;
+    state.frontCanvasObjectKind = nextFrontKind;
+    state.frontPlacedCanvasObjectKind = nextPlacedKind;
+    syncCanvasObjectLayerOrder();
+    return true;
+  }
+  function setTextBoxStackIndex(item, nextIndex) {
+    const currentIndex = state.textBoxes.indexOf(item);
+    if (currentIndex < 0 || !Number.isInteger(nextIndex)) return false;
+    nextIndex = Math.max(0, Math.min(state.textBoxes.length - 1, nextIndex));
+    if (currentIndex === nextIndex) return false;
+    state.textBoxes.splice(currentIndex, 1);
+    state.textBoxes.splice(nextIndex, 0, item);
+    return true;
+  }
+  function bringTextBoxToFront(item) {
+    if (!item || !state.textBoxes.includes(item)) return false;
+    const stackChanged = setTextBoxStackIndex(item, state.textBoxes.length - 1),
+      layerChanged = setCanvasObjectFrontKind("text-box"),
+      changed = stackChanged || layerChanged;
+    if (changed) requestRender();
+    return changed;
+  }
+  function setImageStackIndex(item, nextIndex) {
+    const currentIndex = state.images.indexOf(item);
+    if (currentIndex < 0 || !Number.isInteger(nextIndex)) return false;
+    nextIndex = Math.max(0, Math.min(state.images.length - 1, nextIndex));
+    if (currentIndex === nextIndex) return false;
+    state.images.splice(currentIndex, 1);
+    state.images.splice(nextIndex, 0, item);
+    return true;
+  }
+  function bringImageToFront(item) {
+    if (!item || !state.images.includes(item)) return false;
+    const stackChanged = setImageStackIndex(item, state.images.length - 1),
+      layerChanged = setCanvasObjectFrontKind("image"),
+      changed = stackChanged || layerChanged;
+    if (changed && state.imageEdit?.id === item.id) state.imageEdit.changed = true;
+    if (changed) requestRender();
+    return changed;
   }
   function restoreImages(items) {
     clearHandToolbarTargets("image");
@@ -365,12 +524,15 @@
     if (record.kind === "image") return acceptImageEdit({ restoreMode:false });
     return acceptAnimationEdit();
   }
+  function handToolbarHasActiveOperation(record) {
+    return [...(record?.holds || [])].some((token) => token.startsWith("pointer:") || token.startsWith("operation:"));
+  }
   function scheduleHandObjectToolbarTick() {
     clearTimeout(state.handToolbarTimer);
     state.handToolbarTimer = 0;
     let nextAt = Infinity;
     for (const record of state.handToolbarTargets.values()) {
-      if (record.holds?.size) continue;
+      if (handToolbarHasActiveOperation(record)) continue;
       nextAt = Math.min(nextAt, record.hiding ? record.hideAt : record.expiresAt);
     }
     if (!Number.isFinite(nextAt)) return;
@@ -396,7 +558,7 @@
         finishHandToolbarHide(key);
         continue;
       }
-      if (record.holds?.size) continue;
+      if (handToolbarHasActiveOperation(record)) continue;
       if (record.hiding && record.hideAt <= now) finishHandToolbarHide(key);
       else if (!record.hiding && record.expiresAt <= now) {
         record.hiding = true;
@@ -486,6 +648,13 @@
   function focusHandObject(kind, object, token = "") {
     const ensured = ensureHandToolbarRecord(kind, object);
     if (!ensured) return "";
+    const previousKey = state.handToolbarActiveKey;
+    if (previousKey && previousKey !== ensured.key) finishHandToolbarHide(previousKey);
+    for (const key of [...state.handToolbarTargets.keys()]) {
+      if (key !== ensured.key) finishHandToolbarHide(key);
+    }
+    state.handToolbarActiveKey = ensured.key;
+    ensured.record.expanded = true;
     if (token) ensured.record.holds.add(token);
     ensured.record.expiresAt = Date.now() + HAND_OBJECT_TOOLBAR_VISIBLE_MS;
     ensured.record.hiding = false;
@@ -514,11 +683,13 @@
       object = handToolbarObject(record);
     if (!record || !object) return false;
     const key = handToolbarKey(record.kind, record.id),
-      previousKey = state.handToolbarActiveKey,
-      previous = previousKey && previousKey !== key ? handToolbarRecord(previousKey) : null;
+      previousKey = state.handToolbarActiveKey;
+    if (previousKey && previousKey !== key) finishHandToolbarHide(previousKey);
+    for (const targetKey of [...state.handToolbarTargets.keys()]) {
+      if (targetKey !== key) finishHandToolbarHide(targetKey);
+    }
     state.handToolbarActiveKey = key;
     record.expanded = true;
-    if (previous) finishHandToolbarEdit(previous);
     let activated = true;
     if (record.kind === "widget") activated = beginWidgetEdit(object);
     else if (record.kind === "image") activated = beginImageEdit(object);
@@ -545,36 +716,44 @@
     requestInteractionLayerRender();
     return true;
   }
-  function handObjectToolbarTargetAtPoint(point) {
-    if (!point || !valid(point)) return null;
-    const textBox = textBoxAtPoint(point);
-    if (textBox) return { kind:"text-box", object:textBox };
-    const image = imageAtPoint(point);
-    if (image) return { kind:"image", object:image };
+  function widgetAtPoint(point) {
     const widgets = visibleWidgets();
     for (let index = widgets.length - 1; index >= 0; index--) {
       const widget = widgets[index], box = widgetBox(widget);
-      if (!widget.pending && point.x >= box.x && point.x <= box.x + box.w && point.y >= box.y && point.y <= box.y + box.h) return { kind:"widget", object:widget };
+      if (!widget.pending && point.x >= box.x && point.x <= box.x + box.w && point.y >= box.y && point.y <= box.y + box.h) return widget;
     }
+    return null;
+  }
+  function handObjectToolbarTargetAtPoint(point) {
+    if (!point || !valid(point)) return null;
+    const textBox = textBoxAtPoint(point),
+      image = imageAtPoint(point),
+      widget = widgetAtPoint(point),
+      placed = state.frontPlacedCanvasObjectKind === "text-box"
+        ? [{ kind:"text-box", object:textBox }, { kind:"image", object:image }]
+        : [{ kind:"image", object:image }, { kind:"text-box", object:textBox }],
+      ordered = state.frontCanvasObjectKind === "widget"
+        ? [{ kind:"widget", object:widget }, ...placed]
+        : [...placed, { kind:"widget", object:widget }],
+      target = ordered.find(candidate => candidate.object);
+    if (target) return target;
     const animation = animationPointerHit(point)?.animation;
     if (animation) return { kind:"animation", object:animation };
     return null;
   }
-  function updateHandObjectHover(point) {
-    if (state.mode !== "hand") point = null;
-    const target = point && valid(point) ? handObjectToolbarTargetAtPoint(point) : null,
-      nextKey = target ? handToolbarKey(target.kind, target.object.id) : "",
-      previousKey = state.handHoverKey || "";
-    if (previousKey === nextKey) return Boolean(nextKey);
+  function updateHandObjectHover() {
+    const previousKey = state.handHoverKey || "";
+    state.handHoverKey = "";
     if (previousKey) releaseHandObjectFocus(previousKey, "canvas-hover");
-    state.handHoverKey = nextKey;
-    if (target) focusHandObject(target.kind, target.object, "canvas-hover");
-    return Boolean(nextKey);
+    return false;
   }
   function beginHandObjectFocus(event, point) {
     if (state.mode !== "hand" || Number(event.button) !== 0) return false;
     const target = handObjectToolbarTargetAtPoint(point);
     if (!target) return false;
+    if (target.kind === "widget") bringHtmlWidgetToFront(target.object);
+    else if (target.kind === "image") bringImageToFront(target.object);
+    else if (target.kind === "text-box") bringTextBoxToFront(target.object);
     const token = `pointer:${event.pointerId}`,
       key = focusHandObject(target.kind, target.object, token);
     if (!key) return false;
@@ -669,7 +848,14 @@
     if (state.imageEdit) acceptImageEdit({ restoreMode:false });
     recordImagesBefore();
     state.selectedImageId = item.id;
-    state.imageEdit = { id:item.id, before:imageLayout(item), changed:false };
+    state.imageEdit = {
+      id:item.id,
+      before:imageLayout(item),
+      beforeIndex:state.images.indexOf(item),
+      beforeFrontCanvasObjectKind:state.frontCanvasObjectKind,
+      beforeFrontPlacedCanvasObjectKind:state.frontPlacedCanvasObjectKind,
+      changed:false,
+    };
     requestInteractionLayerRender();
     setStatusKey("imageSelected");
     return true;
@@ -685,17 +871,16 @@
     let refineCandidate = null;
     if (edit?.changed) {
       state.userRevision++;
-      save();
+      saveUserCanvasChange();
     } else if (edit) state.imageHistoryBefore = null;
     if (edit && state.dirtyImageIds.has(edit.id)) {
       recomputeDirtyBounds();
       refineCandidate = relatchWidgetRefineCandidateFromDirty();
     }
     requestRender();
-    if (edit) setStatusKey("ready");
+    if (edit) setStatusKey(options.showHint ? "imagePlaced" : "ready");
     if (edit && restoreMode) finishManualImageHandMode();
     else if (edit) state.imageHandReturnMode = null;
-    if (edit && options.showHint) showHandStatusHint("image-confirmed", ["handImageConfirmedHint", "handAutoAIManual"]);
     if (edit && state.mode !== "hand" && !refineCandidate) schedule();
     return Boolean(edit);
   }
@@ -703,7 +888,11 @@
     const edit = state.imageEdit,
       item = edit ? state.images.find((candidate) => candidate.id === edit.id) : null;
     if (edit) clearHandToolbarTarget("image", edit.id);
-    if (item) Object.assign(item, edit.before);
+    if (item) {
+      Object.assign(item, edit.before);
+      setImageStackIndex(item, edit.beforeIndex);
+      restoreCanvasObjectFrontKinds(edit.beforeFrontCanvasObjectKind, edit.beforeFrontPlacedCanvasObjectKind);
+    }
     state.imageHistoryBefore = null;
     state.imageGesture = null;
     state.imageEdit = null;
@@ -767,6 +956,7 @@
   function beginImageGesture(event, point, result) {
     if (!result?.image) return false;
     beginImageEdit(result.image);
+    bringImageToFront(result.image);
     state.imageGesture = {
       id:event.pointerId,
       image:result.image,
@@ -816,7 +1006,7 @@
       state.imageGesture = null;
     }
     state.userRevision++;
-    save();
+    saveUserCanvasChange();
     if (edited) finishManualImageHandMode();
     if (state.mode !== "hand") schedule();
     requestRender();
@@ -859,18 +1049,17 @@
     recomputeDirtyBounds();
     if (edited) finishManualImageHandMode();
     state.autoEligible = true;
+    saveUserCanvasChange();
     if (state.mode !== "hand") schedule();
-    save();
     requestRender();
     setStatusKey("imageMerged");
-    if (options.showHint) showHandStatusHint("image-merged", ["handImageMergedHint", "handAutoAIManual"]);
     return true;
   }
   function importedImagePlacement(naturalW, naturalH) {
     const visible = viewportRect() || { x:0, y:0, w:SIZE, h:SIZE },
-      rect = view.getBoundingClientRect(),
-      maxW = Math.max(80, Math.min(6000, visible.w * 0.72, Math.max(240, rect.width * 0.52) / state.scale)),
-      maxH = Math.max(80, Math.min(6000, visible.h * 0.72, Math.max(200, rect.height * 0.52) / state.scale)),
+      { width, height } = canvasViewportMetrics(),
+      maxW = Math.max(80, Math.min(6000, visible.w * 0.72, Math.max(240, width * 0.52) / state.scale)),
+      maxH = Math.max(80, Math.min(6000, visible.h * 0.72, Math.max(200, height * 0.52) / state.scale)),
       scale = Math.min(maxW / naturalW, maxH / naturalH),
       w = Math.max(80, naturalW * scale),
       h = Math.max(80, naturalH * scale),
@@ -949,10 +1138,11 @@
       recomputeDirtyBounds();
       state.autoEligible = true;
       state.userRevision++;
-      save();
+      saveUserCanvasChange();
       requestRender();
       enterManualImageHandMode();
       beginImageEdit(item);
+      showHandObjectToolbar("image", item);
       setStatusKey("imageAdded");
     } catch (error) {
       setStatusKey(error?.statusKey || "imageImportFailed");
@@ -972,12 +1162,50 @@
     if (!widgetRuntimeEnabled()) return [];
     return state.widgets.filter((widget) => !widget.hiddenForReplacement && pluginEnabled(widget.pluginId) && pluginManifests.has(widget.pluginId) && (!region || intersection(widgetBox(widget), region)));
   }
+  function syncWidgetLayerOrder() {
+    let stackIndex = 1;
+    for (const widget of state.widgets) {
+      if (widget.styleRule?.style) widget.styleRule.style.zIndex = String(stackIndex);
+      stackIndex++;
+    }
+    if (state.pendingWidget?.styleRule?.style) state.pendingWidget.styleRule.style.zIndex = String(stackIndex);
+    const attachedWidget = [...state.widgets, ...(state.pendingWidget ? [state.pendingWidget] : [])]
+      .find((widget) => widget.shell?.classList?.contains("object-toolbar-attached"));
+    if (attachedWidget?.styleRule?.style) attachedWidget.styleRule.style.zIndex = String(stackIndex + 1);
+  }
+  function setWidgetStackIndex(widget, nextIndex) {
+    const currentIndex = state.widgets.indexOf(widget);
+    if (currentIndex < 0 || !Number.isInteger(nextIndex)) return false;
+    nextIndex = Math.max(0, Math.min(state.widgets.length - 1, nextIndex));
+    if (currentIndex === nextIndex) return false;
+    state.widgets.splice(currentIndex, 1);
+    state.widgets.splice(nextIndex, 0, widget);
+    syncWidgetLayerOrder();
+    return true;
+  }
+  function bringHtmlWidgetToFront(widget) {
+    if (!widget || !state.widgets.includes(widget)) return false;
+    const stackChanged = setWidgetStackIndex(widget, state.widgets.length - 1),
+      layerChanged = setCanvasObjectFrontKind("widget"),
+      changed = stackChanged || layerChanged;
+    if (changed && state.widgetEdit?.id === widget.id) state.widgetEdit.changed = true;
+    return changed;
+  }
   function capturableWidgets(region = null) {
     const widgets = visibleWidgets(region),
       pending = state.pendingWidget;
     if (!pending || !pending.shell || pending.hiddenForReplacement || !pluginEnabled(pending.pluginId) || !pluginManifests.has(pending.pluginId)
       || region && !intersection(widgetBox(pending), region) || widgets.includes(pending)) return widgets;
     return [...widgets, pending];
+  }
+  const PRIVATE_WIDGET_FAVORITE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  function newPrivateWidgetFavoriteId() {
+    const nativeId = globalThis.crypto?.randomUUID?.();
+    if (PRIVATE_WIDGET_FAVORITE_ID.test(String(nativeId || ""))) return nativeId;
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (character) => {
+      const random = Math.floor(Math.random() * 16), value = character === "x" ? random : (random & 3) | 8;
+      return value.toString(16);
+    });
   }
   function serializedWidgets() {
     return state.widgets.map((widget) => ({
@@ -992,7 +1220,11 @@
       contentH: widget.contentH,
       title: widget.title,
       refreshSeconds: widget.refreshSeconds,
+      favoriteSourceId: widget.favoriteSourceId,
       ...(widget.favorite ? { favorite:true } : {}),
+      ...(widget.favoriteArtifactSha256 ? { favoriteArtifactSha256:widget.favoriteArtifactSha256 } : {}),
+      ...(widget.favoriteCloudId ? { favoriteCloudId:widget.favoriteCloudId } : {}),
+      ...(widget.favoriteCommunityItemId ? { favoriteCommunityItemId:widget.favoriteCommunityItemId } : {}),
       ...(widget.widgetType === "diagram_source" ? { source:widget.source } : { html:widget.html }),
       ...(widget.diagramKind ? { diagramKind:widget.diagramKind } : {}),
       ...(widget.sourceFormat ? { sourceFormat:widget.sourceFormat } : {}),
@@ -1074,9 +1306,12 @@
       communityRootItemId,
       communityOriginName,
       communityOriginGeneration,
+      favoriteSourceId: PRIVATE_WIDGET_FAVORITE_ID.test(String(item.favoriteSourceId || "")) ? item.favoriteSourceId : newPrivateWidgetFavoriteId(),
       favorite: item.favorite === true,
+      favoriteArtifactSha256: /^[0-9a-f]{64}$/i.test(String(item.favoriteArtifactSha256 || "")) ? item.favoriteArtifactSha256.toLowerCase() : "",
+      favoriteCloudId: PRIVATE_WIDGET_FAVORITE_ID.test(String(item.favoriteCloudId || "")) ? String(item.favoriteCloudId).toLowerCase() : null,
+      favoriteCommunityItemId: PRIVATE_WIDGET_FAVORITE_ID.test(String(item.favoriteCommunityItemId || "")) ? String(item.favoriteCommunityItemId).toLowerCase() : null,
       favoriteBusy: false,
-      favoritePendingVersion: null,
       downloadBusy: false,
     };
   }
@@ -1117,20 +1352,29 @@
     canvas.width = canvas.height = 1;
     const publicWidget = { ...serialized };
     delete publicWidget.favorite;
+    delete publicWidget.favoriteSourceId;
+    delete publicWidget.favoriteArtifactSha256;
+    delete publicWidget.favoriteCloudId;
+    delete publicWidget.favoriteCommunityItemId;
     return { format:"penecho-widget", formatVersion:1, widget:publicWidget, ...communityImages };
   }
-  function setCommunityWidgetFavorite(widgetId, favorite, busy = false) {
+  function setCommunityWidgetFavorite(widgetId, favorite, busy = false, artifactSha256 = undefined, reference = undefined) {
     const widget = state.widgets.find((item) => item.id === widgetId);
     if (!widget) return false;
-    if (busy === true && !widget.favoriteBusy) widget.favoritePendingVersion = widget.contentVersion;
     if (typeof favorite === "boolean") {
-      const changedWhileSaving = favorite === true
-        && Number.isInteger(widget.favoritePendingVersion)
-        && widget.favoritePendingVersion !== widget.contentVersion;
-      if (!changedWhileSaving) widget.favorite = favorite;
+      widget.favorite = favorite;
+      if (!favorite) {
+        widget.favoriteArtifactSha256 = "";
+        widget.favoriteCloudId = null;
+        widget.favoriteCommunityItemId = null;
+      }
+      else if (/^[0-9a-f]{64}$/i.test(String(artifactSha256 || ""))) widget.favoriteArtifactSha256 = String(artifactSha256).toLowerCase();
+    }
+    if (reference && typeof reference === "object") {
+      if (Object.hasOwn(reference, "cloudFavoriteId")) widget.favoriteCloudId = PRIVATE_WIDGET_FAVORITE_ID.test(String(reference.cloudFavoriteId || "")) ? String(reference.cloudFavoriteId).toLowerCase() : null;
+      if (Object.hasOwn(reference, "communityItemId")) widget.favoriteCommunityItemId = PRIVATE_WIDGET_FAVORITE_ID.test(String(reference.communityItemId || "")) ? String(reference.communityItemId).toLowerCase() : null;
     }
     widget.favoriteBusy = busy === true;
-    if (!widget.favoriteBusy) widget.favoritePendingVersion = null;
     syncObjectChrome();
     return widget.favorite;
   }
@@ -1139,8 +1383,23 @@
     if (!artifact || artifact.format !== "penecho-widget" || artifact.formatVersion !== 1 || !artifact.widget) throw Error("The community Widget is invalid.");
     if (state.pendingWidget) acceptPendingWidget({ restoreMode:false });
     if (state.widgetEdit) acceptWidgetEdit();
-    const visible = viewportRect(), source = { ...artifact.widget };
+    const visible = viewportRect(), source = { ...artifact.widget }, favoriteState = options?.favoriteState;
     delete source.id;
+    // Favorite membership is private Canvas state. Never trust it from a
+    // shareable artifact; only the authenticated Favorites loader may attach
+    // the stable logical source identity and the current storage references.
+    delete source.favorite;
+    delete source.favoriteSourceId;
+    delete source.favoriteArtifactSha256;
+    delete source.favoriteCloudId;
+    delete source.favoriteCommunityItemId;
+    if (favoriteState?.selected === true) {
+      source.favorite = true;
+      if (PRIVATE_WIDGET_FAVORITE_ID.test(String(favoriteState.sourceWidgetId || ""))) source.favoriteSourceId = String(favoriteState.sourceWidgetId).toLowerCase();
+      if (/^[0-9a-f]{64}$/i.test(String(favoriteState.artifactSha256 || ""))) source.favoriteArtifactSha256 = String(favoriteState.artifactSha256).toLowerCase();
+      if (PRIVATE_WIDGET_FAVORITE_ID.test(String(favoriteState.cloudFavoriteId || ""))) source.favoriteCloudId = String(favoriteState.cloudFavoriteId).toLowerCase();
+      if (PRIVATE_WIDGET_FAVORITE_ID.test(String(favoriteState.communityItemId || ""))) source.favoriteCommunityItemId = String(favoriteState.communityItemId).toLowerCase();
+    }
     // Fit the widget into the visible canvas: oversized widgets shrink
     // uniformly (content scales through the shell transform) and land centered
     // instead of spilling past the viewport edges.
@@ -1168,7 +1427,7 @@
     }
     state.userRevision++;
     state.autoEligible = false;
-    save();
+    saveUserCanvasChange();
     requestRender();
     return { id:widget.id, title:widget.title };
   }
@@ -1189,8 +1448,48 @@
     }
     if (configuredAccessSession) url.searchParams.set("access-session", configuredAccessSession);
     if (runtime === "cloud") url.searchParams.set("remote-canvas", "1");
+    if (runtime === "cloud" && manifest.id === "general") url.searchParams.set("public-https", "1");
     for (const origin of manifest.connect) url.searchParams.append("connect", origin);
     return url.href;
+  }
+  function createWidgetResizeHandle(widget, hit) {
+    const handle = document.createElement("div");
+    handle.className = `canvas-widget-resize-handle ${hit === "width" ? "width" : hit === "height" ? "height" : "corner"}`;
+    handle.setAttribute("aria-hidden", "true");
+    handle.addEventListener("pointerdown", (event) => {
+      if (state.viewMode || state.mode !== "hand" || Number(event.button) !== 0) return;
+      const pending = widget === state.pendingWidget && widget.pending === true;
+      if (!pending && !showHandObjectToolbar("widget", widget)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      finishStaleWidgetHostGesture(event);
+      if (!beginWidgetGesture(event, clientPoint(event), { widget, hit, pending })) return;
+      try { handle.setPointerCapture(event.pointerId); } catch {}
+    });
+    handle.addEventListener("pointermove", (event) => {
+      if (finishReleasedWidgetGesture(event) || state.widgetGesture?.id !== event.pointerId) return;
+      event.preventDefault();
+      updateWidgetGesture(event);
+    });
+    const finish = (event) => {
+      if (state.widgetGesture?.id !== event.pointerId) return;
+      event.preventDefault();
+      finishWidgetGesture(event);
+    };
+    handle.addEventListener("pointerup", finish);
+    handle.addEventListener("pointercancel", finish);
+    handle.addEventListener("lostpointercapture", finish);
+    return handle;
+  }
+  function updateWidgetHostForFrameLoad(widget, loadState) {
+    const reload = loadState.observed;
+    loadState.observed = true;
+    if (!reload) return false;
+    widget.initialized = false;
+    widget.hostReady = false;
+    widget.hostStateKey = null;
+    widget.hostReadyPromise = new Promise((resolve) => (widget.resolveHostReady = resolve));
+    return true;
   }
   function mountWidget(widget) {
     if (widget.shell || !pluginEnabled(widget.pluginId)) return;
@@ -1206,7 +1505,8 @@
       widget.copyLabel = runtime.copyLabel(widget.sourceFormat);
     }
     const shell = document.createElement("section"),
-      frame = document.createElement("iframe");
+      frame = document.createElement("iframe"),
+      hostLoadState = { observed:false };
     shell.className = `canvas-widget${widget.pending ? " pending" : ""}`;
     shell.dataset.widgetId = widget.id;
     shell.tabIndex = widget.pending ? -1 : 0;
@@ -1217,16 +1517,18 @@
     frame.referrerPolicy = "no-referrer";
     frame.src = widgetHostUrl(manifest);
     frame.addEventListener("load", () => {
-      if (widget.frame === frame) probeWidgetHost(widget);
+      if (widget.frame !== frame) return;
+      updateWidgetHostForFrameLoad(widget, hostLoadState);
+      probeWidgetHost(widget);
     });
-    frame.addEventListener("pointerenter", (event) => {
-      if (state.mode !== "hand" || event.pointerType === "touch") return;
-      updateHandObjectHover(clientPoint(event));
-    });
-    frame.addEventListener("pointerleave", () => updateHandObjectHover(null));
     frame.addEventListener("focus", () => focusHandObject("widget", widget, "widget-focus"));
     frame.addEventListener("blur", () => releaseHandObjectFocus(handToolbarKey("widget", widget.id), "widget-focus"));
-    shell.append(frame);
+    shell.append(
+      frame,
+      createWidgetResizeHandle(widget, "width"),
+      createWidgetResizeHandle(widget, "height"),
+      createWidgetResizeHandle(widget, "resize"),
+    );
     widgetLayer.append(shell);
     widget.shell = shell;
     widget.frame = frame;
@@ -1239,6 +1541,8 @@
     widget.hostReadyPromise = new Promise((resolve) => (widget.resolveHostReady = resolve));
     widget.hostStateKey = null;
     addWidgetStyleRule(widget);
+    syncWidgetLayerOrder();
+    syncCanvasWidgetCarrier();
     positionWidget(widget);
   }
   function unmountWidget(widget) {
@@ -1264,6 +1568,7 @@
   function addWidgetStyleRule(widget) {
     const sheet = textEditorStyleSheet(), className = `canvas-widget-instance-${widget.id.replace(/[^a-z0-9-]/g, "")}`;
     if (!sheet) return;
+    widget.styleTransformKey = null;
     try {
       sheet.insertRule(`.${className} { width: ${widget.contentW}px; height: ${widget.contentH}px; }`, sheet.cssRules.length);
       widget.styleRule = [...sheet.cssRules].find((rule) => rule.selectorText === `.${className}`) || null;
@@ -1295,10 +1600,26 @@
     if (active) sendWidgetInit(widget);
     return active;
   }
+  let canvasWidgetCarrierPanX = Number.NaN;
+  let canvasWidgetCarrierPanY = Number.NaN;
+  let canvasWidgetCarrierPreviewScale = Number.NaN;
+  function syncCanvasWidgetCarrier(previewScale = 1) {
+    if (canvasWidgetCarrierPanX === state.panX && canvasWidgetCarrierPanY === state.panY && canvasWidgetCarrierPreviewScale === previewScale) return;
+    const style = runtimeElementStyle(view, "canvas-widget-carrier");
+    if (!style) return;
+    style.setProperty("--canvas-widget-pan-x", `${state.panX}px`);
+    style.setProperty("--canvas-widget-pan-y", `${state.panY}px`);
+    style.setProperty("--canvas-widget-preview-scale", String(previewScale));
+    canvasWidgetCarrierPanX = state.panX;
+    canvasWidgetCarrierPanY = state.panY;
+    canvasWidgetCarrierPreviewScale = previewScale;
+  }
   function positionWidget(widget) {
     if (!widget.shell) return;
-    const screenX = state.panX + widget.x * state.scale,
-      screenY = state.panY + widget.y * state.scale,
+    const localX = widget.x * state.scale,
+      localY = widget.y * state.scale,
+      screenX = state.panX + localX,
+      screenY = state.panY + localY,
       scaleX = state.scale * widget.w / widget.contentW,
       scaleY = state.scale * widget.h / widget.contentH,
       declaration = widget.styleRule?.style;
@@ -1309,12 +1630,21 @@
       declaration.width = `${widget.contentW}px`;
       declaration.height = `${widget.contentH}px`;
     }
-    declaration.transform = `translate3d(${screenX}px,${screenY}px,0) scale(${scaleX},${scaleY})`;
+    const transformKey = `${localX}:${localY}:${scaleX}:${scaleY}`;
+    if (widget.styleTransformKey !== transformKey) {
+      widget.styleTransformKey = transformKey;
+      declaration.transform = `translate3d(${localX}px,${localY}px,0) scale(${scaleX},${scaleY})`;
+      declaration.setProperty?.("--widget-resize-edge-x", `${14 / scaleX}px`);
+      declaration.setProperty?.("--widget-resize-edge-y", `${14 / scaleY}px`);
+      declaration.setProperty?.("--widget-resize-corner-x", `${18 / scaleX}px`);
+      declaration.setProperty?.("--widget-resize-corner-y", `${18 / scaleY}px`);
+    }
     updateWidgetRenderVisibility(widget, screenX, screenY);
     sendWidgetHostState(widget, scaleX, scaleY);
   }
   function positionWidgets() {
     if (!widgetRuntimeEnabled()) return;
+    syncCanvasWidgetCarrier();
     for (const widget of [...state.widgets, ...(state.pendingWidget ? [state.pendingWidget] : [])]) positionWidget(widget);
   }
   function probeWidgetHost(widget) {
@@ -1337,9 +1667,10 @@
     }, widget.hostOrigin || location.origin);
   }
   function sendWidgetHostState(widget, scaleX = state.scale * widget.w / widget.contentW, scaleY = state.scale * widget.h / widget.contentH, force = false) {
+    const selected = widget.pending === true || (state.widgetEdit?.id === widget.id && state.selectedWidgetId === widget.id);
+    widget.shell?.classList.toggle("is-selected", selected);
     if (!widget.frame?.contentWindow || !widget.hostReady || !Number.isFinite(scaleX) || scaleX <= 0 || !Number.isFinite(scaleY) || scaleY <= 0) return;
-    const selected = widget.pending === true || (state.widgetEdit?.id === widget.id && state.selectedWidgetId === widget.id),
-      active = widget.renderActive !== false,
+    const active = widget.renderActive !== false,
       key = `${selected ? 1 : 0}:${active ? 1 : 0}:${state.navigationLocked ? 1 : 0}:${scaleX.toFixed(6)}:${scaleY.toFixed(6)}`;
     if (!force && widget.hostStateKey === key) return;
     widget.hostStateKey = key;
@@ -1415,7 +1746,7 @@
           const timer = setTimeout(() => {
             widgetSnapshotRequests.delete(requestId);
             if(signal&&pending?.abort)signal.removeEventListener("abort",pending.abort);
-            reject(Error(t("widgetExportFailed")));
+            reject(Error("Widget snapshot timed out"));
           }, remaining());
           const abort=()=>{
             if(widgetSnapshotRequests.get(requestId)!==pending)return;
@@ -1462,7 +1793,7 @@
     if (validWidgetHostActivate(message)) {
       if (state.mode === "hand") {
         const target = handObjectToolbarTargetFromWidgetMessage(widget, message);
-        if (target) focusHandObject(target.kind, target.object);
+        if (target && showHandObjectToolbar(target.kind, target.object) && target.kind === "widget") bringHtmlWidgetToFront(target.object);
       }
       return;
     }
@@ -1494,10 +1825,6 @@
     if (message.type === "penecho-widget-updated") {
       widget.contentVersion++;
       widget.snapshotDataUrl = "";
-      if (widget.favorite) {
-        widget.favorite = false;
-        syncObjectChrome();
-      }
       return;
     }
     if (!["penecho-widget-snapshot", "penecho-widget-snapshot-error"].includes(message.type)) return;
@@ -1508,8 +1835,11 @@
     pending.signal?.removeEventListener("abort",pending.abort);
     if (message.type === "penecho-widget-snapshot-error" || typeof message.dataUrl !== "string" || !message.dataUrl.startsWith("data:image/png;base64,")
       || !Number.isFinite(message.width) || message.width <= 0 || !Number.isFinite(message.height) || message.height <= 0) {
-      if (message.type === "penecho-widget-snapshot-error") console.warn("PenEcho widget snapshot failed:", String(message.error || "unknown error").slice(0, 300));
-      pending.reject(Error(t("widgetExportFailed")));
+      const snapshotFailure = message.type === "penecho-widget-snapshot-error"
+        ? String(message.error || t("widgetExportFailed")).replace(/[\r\n\t]+/g, " ").slice(0, 300)
+        : t("widgetExportFailed");
+      if (message.type === "penecho-widget-snapshot-error") console.warn("PenEcho widget snapshot failed:", snapshotFailure);
+      pending.reject(Error(snapshotFailure));
       return;
     }
     try {
@@ -1535,7 +1865,14 @@
     if (state.widgetEdit) acceptWidgetEdit();
     recordWidgetsBefore();
     state.selectedWidgetId = widget.id;
-    state.widgetEdit = { id:widget.id, before:widgetLayout(widget), changed:false };
+    state.widgetEdit = {
+      id:widget.id,
+      before:widgetLayout(widget),
+      beforeIndex:state.widgets.indexOf(widget),
+      beforeFrontCanvasObjectKind:state.frontCanvasObjectKind,
+      beforeFrontPlacedCanvasObjectKind:state.frontPlacedCanvasObjectKind,
+      changed:false,
+    };
     syncWidgetHostStates();
     requestInteractionLayerRender();
     return true;
@@ -1549,7 +1886,7 @@
     state.selectedWidgetId = null;
     if (edit?.changed) {
       state.userRevision++;
-      save();
+      saveUserCanvasChange();
     } else if (edit) state.widgetHistoryBefore = null;
     syncWidgetHostStates();
     requestInteractionLayerRender();
@@ -1563,6 +1900,8 @@
     if (edit) clearHandToolbarTarget("widget", edit.id);
     if (widget) {
       Object.assign(widget, edit.before);
+      setWidgetStackIndex(widget, edit.beforeIndex);
+      restoreCanvasObjectFrontKinds(edit.beforeFrontCanvasObjectKind, edit.beforeFrontPlacedCanvasObjectKind);
       positionWidget(widget);
     }
     state.widgetHistoryBefore = null;
@@ -1574,21 +1913,36 @@
     if (edit) setStatusKey("ready");
     return Boolean(edit);
   }
+  function widgetResizeHit(box, point, pointerType = "mouse") {
+    const scale = Math.max(.03, Number(state.scale) || 1),
+      edge = (pointerType === "touch" ? 22 : 7) / scale,
+      corner = (pointerType === "touch" ? 28 : 16) / scale,
+      right = box.x + box.w,
+      bottom = box.y + box.h,
+      nearCorner = point.x >= right - corner && point.x <= right + edge
+        && point.y >= bottom - corner && point.y <= bottom + edge,
+      nearRight = Math.abs(point.x - right) <= edge
+        && point.y >= box.y - edge && point.y <= bottom + edge,
+      nearBottom = Math.abs(point.y - bottom) <= edge
+        && point.x >= box.x - edge && point.x <= right + edge;
+    if (nearCorner) return "resize";
+    if (nearRight) return "width";
+    if (nearBottom) return "height";
+    return null;
+  }
   function widgetControlHit(widget, point, pointerType = "mouse") {
     const box = widgetBox(widget),
       handle = 14 / state.scale,
-      radius = (pointerType === "touch" ? 24 : 14) / state.scale,
       actionRadius = pointerType === "touch" ? 22 / state.scale : Math.max(handle * 0.8, 9 / state.scale),
       controls = [
         ...Object.entries(draftActionPoints(box, handle, false, true)).map(([hit, target]) => ({ hit, target, radius:actionRadius })),
-        { hit:"resize", target:{ x:box.x + box.w, y:box.y + box.h }, radius },
-        { hit:"width", target:{ x:box.x + box.w + handle * 0.08, y:box.y + box.h / 2 }, radius },
-        { hit:"height", target:{ x:box.x + box.w / 2, y:box.y + box.h + handle * 0.08 }, radius },
       ],
       control = controls
         .map((item) => ({ ...item, distance:Math.hypot(point.x - item.target.x, point.y - item.target.y) }))
         .filter((item) => item.distance <= item.radius)
         .sort((a, b) => a.distance - b.distance)[0];
+    const resizeHit = widgetResizeHit(box, point, pointerType);
+    if (resizeHit) return resizeHit;
     if (control) return control.hit;
     return point.x >= box.x && point.x <= box.x + box.w && point.y >= box.y && point.y <= box.y + box.h ? "move" : null;
   }
@@ -1614,6 +1968,20 @@
       }
     }
     return null;
+  }
+  function widgetResizeCursor(point, pointerType = "mouse") {
+    const hit = widgetPointerHit(point, pointerType, false)?.hit;
+    if (hit === "resize") return "nwse-resize";
+    if (hit === "width") return "ew-resize";
+    if (hit === "height") return "ns-resize";
+    return "";
+  }
+  function syncWidgetResizeCursor(point, pointerType = "mouse") {
+    if (state.mode !== "hand" || pointerType === "touch" || state.widgetGesture) return false;
+    const cursor = widgetResizeCursor(point, pointerType);
+    if (cursor) setCanvasCursor(cursor);
+    else resetCanvasCursor();
+    return Boolean(cursor);
   }
   function resizeWidgetBox(start, point, hit, minimumWidth = 300, minimumHeight = 200, limit = SIZE) {
     const contentW = start.contentW ?? start.w,
@@ -1642,7 +2010,10 @@
     if (!result?.widget) return false;
     if (result.hit === "accept") return (result.pending ? acceptPendingWidget({ showHint:true }) : acceptWidgetEdit({ showHint:true })) || true;
     if (result.hit === "cancel") return (result.pending ? rejectPendingWidget() : deleteWidget(result.widget)) || true;
-    if (!result.pending) beginWidgetEdit(result.widget);
+    if (!result.pending) {
+      beginWidgetEdit(result.widget);
+      bringHtmlWidgetToFront(result.widget);
+    }
     state.widgetGesture = {
       id:event.pointerId,
       widget:result.widget,
@@ -1808,6 +2179,7 @@
     if (!pending && (!state.widgets.includes(widget) || !beginWidgetEdit(widget))) return false;
     const viewportPoint = widgetHostViewportPoint(widget, message);
     if (!viewportPoint) return false;
+    if (!pending) bringHtmlWidgetToFront(widget);
     state.widgetGesture = {
       id:widgetHostPointerId(widget, message.pointerId),
       hostPointerId:message.pointerId,
@@ -1860,7 +2232,7 @@
       state.widgetGesture = null;
     }
     state.userRevision++;
-    save();
+    saveUserCanvasChange();
     requestInteractionLayerRender();
     setStatusKey("widgetDeleted");
     return true;
@@ -2017,7 +2389,7 @@
           ]);
           else await request;
         } catch (error) {
-          if(signal?.aborted)throw error;
+          if(signal?.aborted || !bestEffort)throw error;
           debug("widget-snapshot-degraded", { widgetId:widget.id, error:String(error?.message || error).slice(0, 300) });
         }
         return Boolean(widget.snapshotImage);
@@ -2025,7 +2397,7 @@
         capturedCount = captured.filter(Boolean).length;
       return { total:widgets.length, captured:capturedCount, missing:widgets.length - capturedCount };
     } catch (error) {
-      if(signal?.aborted)throw error;
+      if(signal?.aborted || !bestEffort)throw error;
       debug("widget-snapshot-preparation-failed", { error:String(error?.message || error).slice(0, 300) });
       const captured = widgets.filter((widget) => widget.snapshotImage).length;
       return { total:widgets.length, captured, missing:widgets.length - captured };
@@ -2144,7 +2516,7 @@
     hideAnimationControls();
     if (edit?.changed) {
       state.userRevision++;
-      save();
+      saveUserCanvasChange();
     } else if (edit) state.animationHistoryBefore = null;
     requestAnimationLayerRender();
     requestInteractionLayerRender();
@@ -2209,7 +2581,7 @@
     state.animationEdit = null;
     hideAnimationControls();
     state.userRevision++;
-    save();
+    saveUserCanvasChange();
     requestAnimationLayerRender();
     requestInteractionLayerRender();
     setStatusKey("animationDeleted");
@@ -2309,7 +2681,7 @@
       if (target.kind === "confirmed") acceptAnimationEdit();
       return;
     }
-    const rect = view.getBoundingClientRect(),
+    const { width:viewportWidth, height:viewportHeight } = canvasViewportMetrics(),
       box = target.box,
       left = state.panX + box.x * state.scale,
       top = state.panY + box.y * state.scale,
@@ -2318,8 +2690,8 @@
       controlsHeight = animationControls.offsetHeight || 36,
       editControlsClearance = 28,
       controlsStyle = runtimeElementStyle(animationControls, "animation-controls"),
-      x = Math.max(8, Math.min(rect.width - controlsWidth - 8, left + width / 2 - controlsWidth / 2)),
-      y = top - controlsHeight - editControlsClearance >= 8 ? top - controlsHeight - editControlsClearance : Math.min(rect.height - controlsHeight - 8, top + box.h * state.scale + editControlsClearance),
+      x = Math.max(8, Math.min(viewportWidth - controlsWidth - 8, left + width / 2 - controlsWidth / 2)),
+      y = top - controlsHeight - editControlsClearance >= 8 ? top - controlsHeight - editControlsClearance : Math.min(viewportHeight - controlsHeight - 8, top + box.h * state.scale + editControlsClearance),
       nextX = Math.round(x) + "px",
       nextY = Math.round(y) + "px",
       nextLabel = t(target.playback.paused ? "animationPlay" : "animationPause");
@@ -2383,9 +2755,9 @@
   }
   function clearAnimationLayer() {
     const d = devicePixelRatio || 1,
-      rect = view.getBoundingClientRect();
+      { width, height } = canvasViewportMetrics();
     animationCtx.setTransform(d, 0, 0, d, 0, 0);
-    animationCtx.clearRect(0, 0, rect.width, rect.height);
+    animationCtx.clearRect(0, 0, width, height);
     state.animationScreenBoxes.clear();
     state.animationRenderedPlayheads.clear();
     state.animationFullRedraw = true;
@@ -2396,7 +2768,8 @@
       return;
     }
     const d = devicePixelRatio || 1,
-      rect = view.getBoundingClientRect(),
+      { width, height } = canvasViewportMetrics(),
+      rect = { width, height },
       visible = viewportRect(),
       animations = visibleAnimations(visible),
       currentBoxes = new Map(animations.map((animation) => [animation.id, animationScreenBox(animation)])),
@@ -2456,6 +2829,95 @@
       render();
     });
   }
+  const CANVAS_NAVIGATION_SETTLE_MS = 80;
+  const CANVAS_NAVIGATION_REBASE_VIEWPORT_RATIO = 0.60;
+  const CANVAS_NAVIGATION_REBASE_MIN_PX = 192;
+  let canvasNavigationPreviewFrame = 0;
+  let canvasNavigationPreviewSettleTimer = 0;
+  let canvasNavigationPreviewPanX = 0;
+  let canvasNavigationPreviewPanY = 0;
+  let canvasNavigationPreviewScale = 1;
+  let canvasNavigationPreviewViewportWidth = 0;
+  let canvasNavigationPreviewViewportHeight = 0;
+  let canvasNavigationPreviewRebaseX = CANVAS_NAVIGATION_REBASE_MIN_PX;
+  let canvasNavigationPreviewRebaseY = CANVAS_NAVIGATION_REBASE_MIN_PX;
+  function canvasNavigationPreviewTransform() {
+    const scale = state.scale / canvasNavigationPreviewScale;
+    return {
+      scale,
+      x:state.panX - canvasNavigationPreviewPanX * scale,
+      y:state.panY - canvasNavigationPreviewPanY * scale,
+    };
+  }
+  function canvasNavigationPreviewDisplacement(transform = canvasNavigationPreviewTransform()) {
+    const scaleDelta = transform.scale - 1;
+    return {
+      x:Math.max(Math.abs(transform.x), Math.abs(transform.x + canvasNavigationPreviewViewportWidth * scaleDelta)),
+      y:Math.max(Math.abs(transform.y), Math.abs(transform.y + canvasNavigationPreviewViewportHeight * scaleDelta)),
+    };
+  }
+  function applyCanvasNavigationPreview() {
+    const style = runtimeElementStyle(view, "canvas-navigation-preview"),
+      { scale, x, y } = canvasNavigationPreviewTransform();
+    style?.setProperty("--canvas-navigation-preview-x", `${x}px`);
+    style?.setProperty("--canvas-navigation-preview-y", `${y}px`);
+    style?.setProperty("--canvas-navigation-preview-scale", String(scale));
+    style?.setProperty("--canvas-navigation-preview-paper", state.paint.paper);
+    syncCanvasWidgetCarrier(scale);
+    view.classList.add("canvas-navigation-previewing");
+  }
+  function resetCanvasNavigationPreview() {
+    if (canvasNavigationPreviewFrame) cancelAnimationFrame(canvasNavigationPreviewFrame);
+    if (canvasNavigationPreviewSettleTimer) clearTimeout(canvasNavigationPreviewSettleTimer);
+    canvasNavigationPreviewFrame = 0;
+    canvasNavigationPreviewSettleTimer = 0;
+    canvasNavigationPreviewPanX = state.panX;
+    canvasNavigationPreviewPanY = state.panY;
+    canvasNavigationPreviewScale = state.scale;
+    syncCanvasWidgetCarrier();
+    view.classList.remove("canvas-navigation-previewing");
+  }
+  function finishCanvasNavigationPreview() {
+    if (canvasNavigationPreviewSettleTimer) clearTimeout(canvasNavigationPreviewSettleTimer);
+    canvasNavigationPreviewSettleTimer = 0;
+    if (!view.classList.contains("canvas-navigation-previewing")) return false;
+    flushCoordinatesUpdate();
+    if (!state.renderQueued) render();
+    void refreshVisibleTextBoxQuality();
+    return true;
+  }
+  function canvasNavigationPreviewStep() {
+    canvasNavigationPreviewFrame = 0;
+    if (!view.classList.contains("canvas-navigation-previewing")) return;
+    applyCanvasNavigationPreview();
+    requestCoordinatesUpdate();
+    requestAnimationLayerRender();
+    if (state.renderQueued) return;
+    const displacement = canvasNavigationPreviewDisplacement();
+    if (displacement.x >= canvasNavigationPreviewRebaseX || displacement.y >= canvasNavigationPreviewRebaseY) {
+      render();
+      void refreshVisibleTextBoxQuality();
+    }
+  }
+  function requestCanvasNavigationPreview(previousPanX, previousPanY, previousScale = state.scale) {
+    canvasTextQualityGeneration++;
+    noteCanvasChromeInteraction();
+    noteCanvasAgentNavigation();
+    if (!view.classList.contains("canvas-navigation-previewing")) {
+      canvasNavigationPreviewPanX = previousPanX;
+      canvasNavigationPreviewPanY = previousPanY;
+      canvasNavigationPreviewScale = previousScale;
+      const { width, height } = canvasViewportMetrics();
+      canvasNavigationPreviewViewportWidth = width;
+      canvasNavigationPreviewViewportHeight = height;
+      canvasNavigationPreviewRebaseX = Math.max(CANVAS_NAVIGATION_REBASE_MIN_PX, width * CANVAS_NAVIGATION_REBASE_VIEWPORT_RATIO);
+      canvasNavigationPreviewRebaseY = Math.max(CANVAS_NAVIGATION_REBASE_MIN_PX, height * CANVAS_NAVIGATION_REBASE_VIEWPORT_RATIO);
+      view.classList.add("canvas-navigation-previewing");
+    }
+    if (canvasNavigationPreviewSettleTimer) clearTimeout(canvasNavigationPreviewSettleTimer);
+    canvasNavigationPreviewSettleTimer = setTimeout(finishCanvasNavigationPreview, CANVAS_NAVIGATION_SETTLE_MS);
+    if (!state.renderQueued && !canvasNavigationPreviewFrame) canvasNavigationPreviewFrame = requestAnimationFrame(canvasNavigationPreviewStep);
+  }
   function requestInteractionLayerRender() {
     if (state.interactionRenderQueued) return;
     state.interactionRenderQueued = true;
@@ -2477,19 +2939,49 @@
         if (c) fn(c, tx, ty);
       }
   }
+  let liveInkWarmupFrame = 0;
+  let liveInkNeedsWarmup = true;
+  function warmLiveInkLayer() {
+    if (!liveInkLayer.width || !liveInkLayer.height) return false;
+    liveInkCtx.save();
+    liveInkCtx.setTransform(1, 0, 0, 1, 0, 0);
+    liveInkCtx.globalCompositeOperation = "source-over";
+    liveInkCtx.fillStyle = "rgba(0,0,0,0.004)";
+    liveInkCtx.fillRect(0, 0, 1, 1);
+    liveInkCtx.clearRect(0, 0, 1, 1);
+    liveInkCtx.restore();
+    liveInkNeedsWarmup = false;
+    return true;
+  }
+  function scheduleLiveInkLayerWarmup() {
+    if (!liveInkNeedsWarmup || liveInkWarmupFrame) return;
+    liveInkWarmupFrame = requestAnimationFrame(() => {
+      liveInkWarmupFrame = requestAnimationFrame(() => {
+        liveInkWarmupFrame = 0;
+        if (!state.drawing) warmLiveInkLayer();
+      });
+    });
+  }
   function fit() {
-    const r = view.getBoundingClientRect(),
-      d = devicePixelRatio || 1;
-    screen.width = Math.round(r.width * d);
-    screen.height = Math.round(r.height * d);
-    animationLayer.width = screen.width;
-    animationLayer.height = screen.height;
-    placedContentLayer.width = screen.width;
-    placedContentLayer.height = screen.height;
-    inkLayer.width = screen.width;
-    inkLayer.height = screen.height;
-    interactionLayer.width = screen.width;
-    interactionLayer.height = screen.height;
+    invalidateCanvasViewportMetrics();
+    const metrics = canvasViewportMetrics(),
+      r = { width:metrics.width, height:metrics.height },
+      d = devicePixelRatio || 1,
+      width = Math.round(r.width * d),
+      height = Math.round(r.height * d),
+      resizeLayer = (layer) => {
+        if (layer.width === width && layer.height === height) return false;
+        layer.width = width;
+        layer.height = height;
+        return true;
+      };
+    resizeLayer(screen);
+    resizeLayer(animationLayer);
+    resizeLayer(placedContentLayer);
+    resizeLayer(inkLayer);
+    const liveInkResized = resizeLayer(liveInkLayer);
+    if (liveInkResized) liveInkNeedsWarmup = true;
+    resizeLayer(interactionLayer);
     state.animationFullRedraw = true;
     const viewerWidget = viewerAutoFitWidgetId && state.widgets.find((widget) => widget.id === viewerAutoFitWidgetId),
       viewerBounds = viewerWidget
@@ -2513,9 +3005,10 @@
       // top inset keeps it clear of the read-only action bar; every
       // ResizeObserver pass recomputes the frame for phones, tablets and
       // resized desktop windows without changing the content's aspect ratio.
-      const viewerBar = document.querySelector(".viewer-topbar")?.getBoundingClientRect(),
+      const viewerBar = pageLayoutRect(document.querySelector(".viewer-topbar")),
+        viewRect = pageLayoutRect(view),
         sideInset = Math.max(12, Math.min(40, r.width * .035)),
-        topInset = Math.max(64, Math.min(r.height * .4, viewerBar ? viewerBar.bottom - r.top + 12 : r.height * .09)),
+        topInset = Math.max(64, Math.min(r.height * .4, viewerBar && viewRect ? viewerBar.bottom - viewRect.top + 12 : r.height * .09)),
         bottomInset = Math.max(12, Math.min(32, r.height * .035)),
         availableWidth = Math.max(1, r.width - sideInset * 2),
         availableHeight = Math.max(1, r.height - topInset - bottomInset),
@@ -2530,6 +3023,8 @@
       state.panY = (r.height - SIZE * state.scale) / 2;
       state.viewInitialized = true;
     }
+    if (liveInkResized && state.drawing) renderLiveInkDrawing(state.drawing);
+    else scheduleLiveInkLayerWarmup();
     updateCoordinates();
     requestRender();
   }
@@ -2542,7 +3037,8 @@
   }
   function renderPlacedContentLayer(region = null) {
     const d = devicePixelRatio || 1,
-      r = view.getBoundingClientRect(),
+      metrics = canvasViewportMetrics(),
+      r = { width:metrics.width, height:metrics.height },
       visible = region || {
         x:Math.max(0, -state.panX / state.scale),
         y:Math.max(0, -state.panY / state.scale),
@@ -2558,13 +3054,22 @@
     placedContentCtx.beginPath();
     placedContentCtx.rect(0, 0, SIZE, SIZE);
     placedContentCtx.clip();
-    drawImagesToContext(placedContentCtx, visible, state.widgetShadowEnabled);
-    drawTextBoxesToContext(placedContentCtx, visible);
+    drawPlacedCanvasObjectsToContext(placedContentCtx, visible, state.widgetShadowEnabled);
     placedContentCtx.restore();
+  }
+  function drawPlacedCanvasObjectsToContext(context, region = null, withShadow = false) {
+    if (state.frontPlacedCanvasObjectKind === "text-box") {
+      drawImagesToContext(context, region, withShadow);
+      drawTextBoxesToContext(context, region);
+      return;
+    }
+    drawTextBoxesToContext(context, region);
+    drawImagesToContext(context, region, withShadow);
   }
   function renderInkLayer(region = null) {
     const d = devicePixelRatio || 1,
-      r = view.getBoundingClientRect(),
+      metrics = canvasViewportMetrics(),
+      r = { width:metrics.width, height:metrics.height },
       visible = region || {
         x:Math.max(0, -state.panX / state.scale),
         y:Math.max(0, -state.panY / state.scale),
@@ -2584,15 +3089,159 @@
     drawSharpOverlays(inkCtx, visible);
     inkCtx.restore();
   }
-  function updateCoordinates() {
-    const r = view.getBoundingClientRect(),
-      x = (r.width / 2 - state.panX) / state.scale,
-      y = (r.height / 2 - state.panY) / state.scale;
-    coords.textContent = `x ${Math.round(x)} · y ${Math.round(y)} · ${Math.round(state.scale * 100)}%`;
+  function clearLiveInkLayer() {
+    liveInkCtx.setTransform(1, 0, 0, 1, 0, 0);
+    liveInkCtx.clearRect(0, 0, liveInkLayer.width, liveInkLayer.height);
   }
-  function render() {
+  function paintInkDisplaySegment(context, a, b, erase, size, color = state.inkColor) {
+    if (!valid(a) || !valid(b)) return false;
+    const d = devicePixelRatio || 1;
+    context.save();
+    context.setTransform(d, 0, 0, d, 0, 0);
+    context.translate(state.panX, state.panY);
+    context.scale(state.scale, state.scale);
+    context.beginPath();
+    context.rect(0, 0, SIZE, SIZE);
+    context.clip();
+    context.globalCompositeOperation = erase ? "destination-out" : "source-over";
+    context.strokeStyle = color;
+    context.lineWidth = size;
+    context.lineCap = context.lineJoin = "round";
+    context.beginPath();
+    context.moveTo(a.x, a.y);
+    context.lineTo(b.x, b.y);
+    context.stroke();
+    context.restore();
+    return true;
+  }
+  const LIVE_INK_COMMIT_SAMPLE_BATCH = 16;
+  let committedInkRenderFrame = 0;
+  function appendLiveInkSample(drawing, point, size) {
+    const previous = drawing.samples[drawing.samples.length - 1],
+      sample = { point:{ x:point.x, y:point.y }, size };
+    drawing.samples.push(sample);
+    const painted = paintInkDisplaySegment(
+      drawing.erase ? inkCtx : liveInkCtx,
+      previous?.point || sample.point,
+      previous ? sample.point : { x:sample.point.x + 0.01, y:sample.point.y + 0.01 },
+      drawing.erase,
+      size,
+      drawing.color,
+    );
+    if (painted && !drawing.erase) liveInkNeedsWarmup = false;
+  }
+  function renderLiveInkDrawing(drawing) {
+    clearLiveInkLayer();
+    if (!drawing || !drawing.samples?.length) return;
+    if (drawing.erase) renderInkLayer();
+    const displayContext = drawing.erase ? inkCtx : liveInkCtx;
+    const first = drawing.samples[0];
+    paintInkDisplaySegment(displayContext, first.point, { x:first.point.x + 0.01, y:first.point.y + 0.01 }, drawing.erase, first.size, drawing.color);
+    for (let i = 1; i < drawing.samples.length; i++) {
+      const previous = drawing.samples[i - 1], current = drawing.samples[i];
+      paintInkDisplaySegment(displayContext, previous.point, current.point, drawing.erase, current.size, drawing.color);
+    }
+    if (!drawing.erase) liveInkNeedsWarmup = false;
+  }
+  function commitLiveInkDrawingProgress(drawing, force = false) {
+    if (!drawing?.samples?.length) return false;
+    let committed = Math.max(0, Number(drawing.committedSamples) || 0);
+    if (!force && drawing.samples.length - committed < LIVE_INK_COMMIT_SAMPLE_BATCH) return false;
+    if (!committed) {
+      const first = drawing.samples[0];
+      dot(first.point, drawing.erase, first.size, true, drawing.color);
+      committed = 1;
+    }
+    for (let i = committed; i < drawing.samples.length; i++) {
+      const previous = drawing.samples[i - 1], current = drawing.samples[i];
+      stroke(previous.point, current.point, drawing.erase, current.size, true, drawing.color);
+    }
+    drawing.committedSamples = drawing.samples.length;
+    return true;
+  }
+  function requestCommittedInkRender() {
+    if (committedInkRenderFrame) return;
+    committedInkRenderFrame = requestAnimationFrame(() => {
+      committedInkRenderFrame = 0;
+      renderInkLayer();
+      if (state.drawing?.samples?.length) renderLiveInkDrawing(state.drawing);
+      else clearLiveInkLayer();
+      scheduleLiveInkLayerWarmup();
+    });
+  }
+  function commitLiveInkDrawing(drawing) {
+    if (!commitLiveInkDrawingProgress(drawing, true)) return false;
+    requestCommittedInkRender();
+    return true;
+  }
+  const COORDINATES_UPDATE_INTERVAL_MS = 200;
+  let coordinatesUpdateFrame = 0;
+  let coordinatesUpdatePending = false;
+  let coordinatesUpdatePoint = null;
+  let coordinatesLastUpdatedAt = -COORDINATES_UPDATE_INTERVAL_MS;
+  function updateCoordinates(point = null) {
+    const { width, height } = canvasViewportMetrics(),
+      x = point ? point.x : (width / 2 - state.panX) / state.scale,
+      y = point ? point.y : (height / 2 - state.panY) / state.scale,
+      text = `x ${Math.round(x)} · y ${Math.round(y)} · ${Math.round(state.scale * 100)}%`;
+    if (coords.textContent !== text) coords.textContent = text;
+  }
+  function requestCoordinatesUpdate(point = null) {
+    coordinatesUpdatePending = true;
+    coordinatesUpdatePoint = point;
+    if (coordinatesUpdateFrame) return;
+    coordinatesUpdateFrame = requestAnimationFrame((now) => {
+      coordinatesUpdateFrame = 0;
+      if (!coordinatesUpdatePending || now - coordinatesLastUpdatedAt < COORDINATES_UPDATE_INTERVAL_MS) return;
+      const pendingPoint = coordinatesUpdatePoint;
+      coordinatesUpdatePending = false;
+      coordinatesUpdatePoint = null;
+      coordinatesLastUpdatedAt = now;
+      updateCoordinates(pendingPoint);
+    });
+  }
+  function flushCoordinatesUpdate() {
+    if (coordinatesUpdateFrame) cancelAnimationFrame(coordinatesUpdateFrame);
+    coordinatesUpdateFrame = 0;
+    const pendingPoint = coordinatesUpdatePending ? coordinatesUpdatePoint : null;
+    coordinatesUpdatePending = false;
+    coordinatesUpdatePoint = null;
+    coordinatesLastUpdatedAt = performance.now();
+    updateCoordinates(pendingPoint);
+  }
+  function drawCanvasLineGrid(context, region, renderScale) {
+    if (!region || region.w <= 0 || region.h <= 0) return;
+    const scale = Math.max(0.03, Number(renderScale) || 1),
+      step = 500,
+      right = region.x + region.w,
+      bottom = region.y + region.h;
+    context.save();
+    context.strokeStyle = state.paint.paperGrid;
+    context.lineWidth = 1 / scale;
+    context.beginPath();
+    for (let x = Math.floor(region.x / step) * step; x <= right; x += step) {
+      context.moveTo(x, region.y);
+      context.lineTo(x, bottom);
+    }
+    for (let y = Math.floor(region.y / step) * step; y <= bottom; y += step) {
+      context.moveTo(region.x, y);
+      context.lineTo(right, y);
+    }
+    context.stroke();
+    context.restore();
+  }
+  function canvasRenderRegion() {
+    const metrics = canvasViewportMetrics(),
+      r = { width:metrics.width, height:metrics.height },
+      l = Math.max(0, -state.panX / state.scale),
+      t = Math.max(0, -state.panY / state.scale),
+      rr = Math.min(SIZE, (r.width - state.panX) / state.scale),
+      b = Math.min(SIZE, (r.height - state.panY) / state.scale);
+    return { r, visible:{ x:l, y:t, w:rr - l, h:b - t } };
+  }
+  function renderCanvasBackground() {
     const d = devicePixelRatio || 1,
-      r = view.getBoundingClientRect();
+      { r, visible } = canvasRenderRegion();
     ctx.setTransform(d, 0, 0, d, 0, 0);
     ctx.clearRect(0, 0, r.width, r.height);
     ctx.fillStyle = state.paint.outside;
@@ -2602,39 +3251,66 @@
     ctx.scale(state.scale, state.scale);
     ctx.fillStyle = state.paint.paper;
     ctx.fillRect(0, 0, SIZE, SIZE);
-    const l = Math.max(0, -state.panX / state.scale),
-      t = Math.max(0, -state.panY / state.scale),
-      rr = Math.min(SIZE, (r.width - state.panX) / state.scale),
-      b = Math.min(SIZE, (r.height - state.panY) / state.scale);
     ctx.save();
     ctx.beginPath();
     ctx.rect(0, 0, SIZE, SIZE);
     ctx.clip();
-    if (state.gridVisible) {
-      ctx.strokeStyle = state.paint.paperGrid;
-      ctx.lineWidth = 1 / state.scale;
-      ctx.beginPath();
-      for (let x = Math.floor(l / 500) * 500; x < rr; x += 500) {
-        ctx.moveTo(x, t);
-        ctx.lineTo(x, b);
-      }
-      for (let y = Math.floor(t / 500) * 500; y < b; y += 500) {
-        ctx.moveTo(l, y);
-        ctx.lineTo(rr, y);
-      }
-      ctx.stroke();
-    }
+    if (state.gridVisible) drawCanvasLineGrid(ctx, visible, state.scale);
     ctx.restore();
     ctx.strokeStyle = state.paint.border;
     ctx.lineWidth = 2 / state.scale;
     ctx.strokeRect(0, 0, SIZE, SIZE);
     ctx.restore();
-    renderPlacedContentLayer({ x:l, y:t, w:rr - l, h:b - t });
-    renderInkLayer({ x:l, y:t, w:rr - l, h:b - t });
+  }
+  function renderCanvasContent() {
+    resetCanvasNavigationPreview();
+    const { visible } = canvasRenderRegion();
+    renderPlacedContentLayer(visible);
+    renderInkLayer(visible);
     renderInteractionLayer();
     positionWidgets();
     positionTextEditors();
     updateSelectionToolbar();
+  }
+  const canvasRenderTiming = (() => {
+    let enabled = false;
+    try { enabled = new URLSearchParams(location.search).get("renderTiming") === "1"; } catch {}
+    const records = [];
+    if (enabled) globalThis.__PENECHO_RENDER_TIMINGS__ = records;
+    return { enabled, records, limit:300 };
+  })();
+  function canvasRenderTimedStage(record, name, work) {
+    const startedAt = performance.now();
+    const result = work();
+    record[name] = performance.now() - startedAt;
+    return result;
+  }
+  function renderCanvasContentTimed(record) {
+    canvasRenderTimedStage(record, "resetPreviewMs", resetCanvasNavigationPreview);
+    const { visible } = canvasRenderTimedStage(record, "regionMs", canvasRenderRegion);
+    canvasRenderTimedStage(record, "placedContentMs", () => renderPlacedContentLayer(visible));
+    canvasRenderTimedStage(record, "inkMs", () => renderInkLayer(visible));
+    canvasRenderTimedStage(record, "interactionMs", renderInteractionLayer);
+    canvasRenderTimedStage(record, "widgetsMs", positionWidgets);
+    canvasRenderTimedStage(record, "textEditorsMs", positionTextEditors);
+    canvasRenderTimedStage(record, "selectionToolbarMs", updateSelectionToolbar);
+  }
+  function render() {
+    if (!canvasRenderTiming.enabled) {
+      renderCanvasBackground();
+      renderCanvasContent();
+      return;
+    }
+    const record = {
+      startedAt:performance.now(),
+      navigationPreview:view.classList.contains("canvas-navigation-previewing"),
+      scale:state.scale,
+    };
+    canvasRenderTimedStage(record, "backgroundMs", renderCanvasBackground);
+    canvasRenderTimedStage(record, "contentMs", () => renderCanvasContentTimed(record));
+    record.totalMs = performance.now() - record.startedAt;
+    canvasRenderTiming.records.push(record);
+    if (canvasRenderTiming.records.length > canvasRenderTiming.limit) canvasRenderTiming.records.splice(0, canvasRenderTiming.records.length - canvasRenderTiming.limit);
   }
   function drawSelectedAnimation(context) {
     const selected = pluginEnabled("animation") && animationEditChromeVisible() ? selectedAnimation() : null;
@@ -2658,18 +3334,17 @@
     if (state.mode !== "hand" || !state.handToolbarTargets.size) return;
     const unit = 1 / state.scale;
     context.save();
-    context.strokeStyle = "rgba(38, 121, 184, 0.42)";
     context.lineWidth = unit;
     for (const record of state.handToolbarTargets.values()) {
-      if (!record.expanded) continue;
+      if (!record.expanded || record.kind === "widget") continue;
       const object = handToolbarObject(record),
-        box = object && (record.kind === "widget" ? widgetBox(object)
-          : record.kind === "image" ? imageBox(object)
+        box = object && (record.kind === "image" ? imageBox(object)
           : record.kind === "animation" ? animationBox(object)
           : record.kind === "text-box" ? textBoxBox(object)
           : null);
       if (!box) continue;
       context.globalAlpha = record.hiding ? .28 : 1;
+      context.strokeStyle = record.kind === "image" ? state.paint.border || "#d8dbe2" : "rgba(38, 121, 184, 0.42)";
       context.strokeRect(box.x, box.y, box.w, box.h);
     }
     context.restore();
@@ -2812,7 +3487,8 @@
       unit = 1 / state.scale,
       handle = 14 * unit;
     context.save();
-    context.strokeStyle = widget.pending ? "#72b7e5" : "#2679b8";
+    context.strokeStyle = state.paint.accent || "#4f46e5";
+    context.globalAlpha = widget.pending ? .72 : 1;
     context.lineWidth = 2 * unit;
     if (widget.pending) {
       context.setLineDash([7 * unit, 6 * unit]);
@@ -2821,38 +3497,26 @@
     }
     context.beginPath();
     drawResizeHandle(context, box, handle);
-    context.moveTo(box.x + box.w + handle * 0.08, box.y + box.h / 2 - handle * 0.48);
-    context.lineTo(box.x + box.w + handle * 0.08, box.y + box.h / 2 + handle * 0.48);
-    context.moveTo(box.x + box.w / 2 - handle * 0.48, box.y + box.h + handle * 0.08);
-    context.lineTo(box.x + box.w / 2 + handle * 0.48, box.y + box.h + handle * 0.08);
     context.stroke();
     context.restore();
   }
-  function positionImageEditBar() {
+  function positionImageSelectionMaterial() {
     const item = state.imageEdit ? selectedImage() : null;
     if (!item) {
-      imageEditBar.classList.remove("hand-toolbar-hiding");
-      if (!imageEditBar.hidden) imageEditBar.hidden = true;
+      imageSelectionMaterial.hidden = true;
       return;
     }
-    imageEditBar.classList.toggle("hand-toolbar-hiding", Boolean(handToolbarRecord({ kind:"image", id:item.id })?.hiding));
-    if (imageEditBar.hidden) imageEditBar.hidden = false;
-    const rect = view.getBoundingClientRect(),
-      box = imageBox(item),
+    if (imageSelectionMaterial.hidden) imageSelectionMaterial.hidden = false;
+    const box = imageBox(item),
       left = state.panX + box.x * state.scale,
       top = state.panY + box.y * state.scale,
       width = box.w * state.scale,
       height = box.h * state.scale,
-      barWidth = imageEditBar.offsetWidth || 200,
-      barHeight = imageEditBar.offsetHeight || 210,
-      gap = 12,
-      style = runtimeElementStyle(imageEditBar, "image-edit-bar");
-    let x = left + width + gap;
-    if (x + barWidth > rect.width - 8) x = left - barWidth - gap;
-    if (x < 8) x = Math.max(8, Math.min(rect.width - barWidth - 8, left + width / 2 - barWidth / 2));
-    const y = Math.max(8, Math.min(rect.height - barHeight - 8, top + height / 2 - barHeight / 2));
-    style?.setProperty("--image-edit-bar-x", `${x.toFixed(1)}px`);
-    style?.setProperty("--image-edit-bar-y", `${y.toFixed(1)}px`);
+      materialStyle = runtimeElementStyle(imageSelectionMaterial, "canvas-image-selection");
+    materialStyle?.setProperty("--image-selection-x", `${left.toFixed(1)}px`);
+    materialStyle?.setProperty("--image-selection-y", `${top.toFixed(1)}px`);
+    materialStyle?.setProperty("--image-selection-width", `${width.toFixed(1)}px`);
+    materialStyle?.setProperty("--image-selection-height", `${height.toFixed(1)}px`);
   }
   function drawImageChrome(context) {
     const item = state.imageEdit ? selectedImage() : null;
@@ -3124,14 +3788,9 @@
   }
   function objectChromeAnchor(element) {
     if (!element?.getBoundingClientRect) return null;
-    const rect = element.getBoundingClientRect(),
-      viewRect = view.getBoundingClientRect?.() || {left:0,top:0},
-      anchor = {
-        x:rect.left - viewRect.left,
-        y:rect.top - viewRect.top,
-        width:rect.width,
-        height:rect.height,
-      };
+    const rect = canvasElementLayoutRect(element),
+      anchor = rect && { x:rect.left, y:rect.top, width:rect.width, height:rect.height };
+    if (!anchor) return null;
     return Object.values(anchor).every(Number.isFinite) && anchor.width > 0 && anchor.height > 0 ? anchor : null;
   }
   function beginWidgetRefineConfirmation(candidate, anchor = null) {
@@ -3169,11 +3828,21 @@
     triggerWidgetRefineClickPulse(confirmation.widgetId);
     return requestWidgetRefinement(confirmation.widget, confirmation.instructionMode);
   }
-  async function copyWidgetSource(widget) {
+  async function copyWidgetSource(widget, button = null) {
     const source = widgetCopySource(widget);
     if (!source) return false;
+    const generation = button ? (button._copyGeneration || 0) + 1 : 0;
+    if (button) button._copyGeneration = generation;
     const copied = await writeClipboardText(source);
     setStatusKey(copied ? "widgetSourceCopied" : "widgetSourceCopyFailed");
+    if (button && button._copyGeneration === generation) setWidgetCopyButtonState(button, copied);
+    return copied;
+  }
+  async function copyPlotExpression(item) {
+    const expression = typeof item?.plotExpression === "string" ? item.plotExpression : "";
+    if (!expression) return false;
+    const copied = await writeClipboardText(expression);
+    setStatusKey(copied ? "textCopied" : "textCopyFailed");
     return copied;
   }
   function widgetImageFilename(widget) {
@@ -3244,16 +3913,33 @@
     });
     return true;
   }
+  const WIDGET_COPY_ICON_FEEDBACK_MS = 2000;
   const OBJECT_CHROME_ICONS = Object.freeze({
     move:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9V3M9 6l3-3 3 3M12 15v6M9 18l3 3 3-3M9 12H3M6 9l-3 3 3 3M15 12h6M18 9l3 3-3 3"/></svg>',
     accept:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.2 4.2L19 7"/></svg>',
     cancel:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+    merge:'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="11" rx="2"/><path d="m6.5 12 3.2-3.2 2.8 2.8 1.8-1.8 3.2 3.2M8 19c2-1.6 6-1.6 8 0"/></svg>',
     copy:'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>',
     refine:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 1.3 4.2L17.5 8.5l-4.2 1.3L12 14l-1.3-4.2-4.2-1.3 4.2-1.3L12 3Z"/><path d="m18.5 14 .7 2.3 2.3.7-2.3.7-.7 2.3-.7-2.3-2.3-.7 2.3-.7.7-2.3Z"/></svg>',
     favorite:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.6 2.5 5.2 5.7.7-4.2 3.9 1.1 5.6L12 16.2 6.9 19l1.1-5.6-4.2-3.9 5.7-.7Z"/></svg>',
     share:'<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="m8.2 10.8 7.6-4.5M8.2 13.2l7.6 4.5"/></svg>',
     download:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 15v5h14v-5"/></svg>',
   });
+  function setWidgetCopyButtonState(button, copied = false) {
+    if (!button) return;
+    clearTimeout(button._copyIconResetTimer);
+    button._copyIconResetTimer = 0;
+    if (copied) button.dataset.copyState = "copied";
+    else delete button.dataset.copyState;
+    button.innerHTML = OBJECT_CHROME_ICONS[copied ? "accept" : "copy"];
+    button.setAttribute("aria-label", copied ? t("widgetSourceCopied") : objectChromeLabel("copy", button.penechoSpec));
+    if (!copied) return;
+    button._copyIconResetTimer = setTimeout(() => {
+      button._copyIconResetTimer = 0;
+      if (!button.isConnected || button.dataset.copyState !== "copied") return;
+      setWidgetCopyButtonState(button, false);
+    }, WIDGET_COPY_ICON_FEEDBACK_MS);
+  }
   function screenObjectBox(box) {
     return {
       left:state.panX + box.x * state.scale,
@@ -3261,9 +3947,6 @@
       width:box.w * state.scale,
       height:box.h * state.scale,
     };
-  }
-  function widgetToolLabelWidth(label, minimum = 108) {
-    return Math.max(minimum, Math.min(220, 44 + String(label || "").length * 7.2));
   }
   function addWidgetToolSpecs(specs, widget, options = {}) {
     if (!widget) return;
@@ -3274,14 +3957,16 @@
       key:`widget:${widget.id}:tool-copy`,
       kind:"copy",
       label:copyLabel,
-      baseWidth:widgetToolLabelWidth(copyLabel, 118),
-      activate:() => void copyWidgetSource(widget),
+      baseWidth:28,
+      iconOnly:true,
+      activate:(button) => void copyWidgetSource(widget, button),
     });
     if (options.refine && state.widgetRefineConfirmation?.widgetId !== widget.id) items.push({
       key:`widget:${widget.id}:tool-refine`,
       kind:"refine",
       label:t("widgetRefine"),
-      baseWidth:112,
+      baseWidth:92,
+      iconOnly:false,
       refineCandidate:options.refine,
       activate:(button) => void beginWidgetRefineConfirmation(options.refine, objectChromeAnchor(button)),
     });
@@ -3291,20 +3976,28 @@
         key:`widget:${widget.id}:tool-favorite`,
         kind:"favorite",
         label:window.PenEchoCommunityUI.label?.(favoriteLabelKey) || "Favorite",
-        baseWidth:36,
+        baseWidth:28,
         iconOnly:true,
         pressed:widget.favorite === true,
         busy:widget.favoriteBusy === true,
         activate:() => {
           if (widget.favoriteBusy) return;
-          window.dispatchEvent(new CustomEvent("penecho:community-widget-action", { detail:{ action:"favorite", widgetId:widget.id } }));
+          window.dispatchEvent(new CustomEvent("penecho:community-widget-action", { detail:{
+            action:"favorite",
+            widgetId:widget.id,
+            favorite:widget.favorite === true,
+            favoriteArtifactSha256:widget.favoriteArtifactSha256 || null,
+            sourceWidgetId:widget.favoriteSourceId,
+            favoriteCloudId:widget.favoriteCloudId || null,
+            favoriteCommunityItemId:widget.favoriteCommunityItemId || null,
+          } }));
         },
       });
       items.push({
         key:`widget:${widget.id}:tool-share`,
         kind:"share",
         label:window.PenEchoCommunityUI.label?.("shareWidget") || "Share",
-        baseWidth:36,
+        baseWidth:28,
         iconOnly:true,
         activate:() => window.dispatchEvent(new CustomEvent("penecho:community-widget-action", { detail:{ action:"share", widgetId:widget.id } })),
       });
@@ -3313,7 +4006,7 @@
       key:`widget:${widget.id}:tool-download`,
       kind:"download",
       label:t("downloadWidget"),
-      baseWidth:36,
+      baseWidth:28,
       iconOnly:true,
       busy:widget.downloadBusy === true,
       activate:() => void downloadWidgetImage(widget),
@@ -3332,9 +4025,11 @@
         box,
         widget,
         widgetTool:true,
-        widgetToolPlacement:options.widgetCoreMoveKey && options.widgetCoreAcceptKey ? "move-right-or-accept" : "right-middle",
-        widgetCoreMoveKey:options.widgetCoreMoveKey || "",
-        widgetCoreAcceptKey:options.widgetCoreAcceptKey || "",
+        objectToolbarItem:Boolean(options.objectToolbarKey),
+        objectToolbarKey:options.objectToolbarKey || "",
+        toolbarSlot:"tool",
+        toolbarOrder:index,
+        toolbarItemCount:items.length,
         widgetToolGroup,
         groupRefineCandidate:options.refine || null,
         groupItemCount:items.length,
@@ -3344,7 +4039,7 @@
         groupHorizontalOffset:horizontalOffset,
         groupVerticalOffset:index * (34 + gap),
         controlScale:1,
-        baseHeight:34,
+        baseHeight:(options.objectToolbarKey || item.kind === "refine") ? 28 : 34,
         handToolbar:Boolean(options.handToolbar),
         handToolbarKey:options.handToolbarKey || "",
         handToolbarHiding:Boolean(options.handToolbarHiding),
@@ -3353,8 +4048,75 @@
       horizontalOffset += item.baseWidth + gap;
     }
   }
+  function objectToolbarMinimumWidth(toolCount = 0) {
+    const itemSize = 28,
+      itemGap = 4,
+      inset = 4,
+      itemCount = 2 + Math.max(0, Math.floor(Number(toolCount) || 0));
+    return itemCount * itemSize + (itemCount - 1) * itemGap + inset * 2;
+  }
+  function finalizeObjectToolbarWidths(specs) {
+    const toolCounts = new Map();
+    for (const spec of specs) {
+      if (!spec.objectToolbarItem || spec.toolbarSlot !== "tool") continue;
+      toolCounts.set(spec.objectToolbarKey, (toolCounts.get(spec.objectToolbarKey) || 0) + 1);
+    }
+    for (const spec of specs) {
+      if (!spec.objectToolbar) continue;
+      spec.minimumWidth = objectToolbarMinimumWidth(toolCounts.get(spec.key) || 0);
+    }
+    return specs;
+  }
+  function addObjectToolbarSpecs(specs, options) {
+    const toolbarKey = `${options.prefix}:toolbar`,
+      shared = options.shared || {},
+      priority = Number(options.priority) || 4;
+    specs.push({
+      key:toolbarKey,
+      kind:"toolbar",
+      label:t("objectToolbarMove"),
+      box:options.box,
+      target:options.target,
+      object:options.object,
+      objectToolbar:true,
+      minimumWidth:objectToolbarMinimumWidth(),
+      baseHeight:34,
+      ...shared,
+      priority,
+    });
+    specs.push({
+      key:`${options.prefix}:cancel`,
+      kind:"cancel",
+      label:options.cancelLabel,
+      box:options.box,
+      objectToolbarItem:true,
+      objectToolbarKey:toolbarKey,
+      toolbarSlot:"leading",
+      baseWidth:28,
+      baseHeight:28,
+      activate:options.cancel,
+      ...shared,
+      priority:priority + 1,
+    });
+    specs.push({
+      key:`${options.prefix}:accept`,
+      kind:"accept",
+      label:options.acceptLabel,
+      tooltip:options.acceptTooltip || "",
+      box:options.box,
+      objectToolbarItem:true,
+      objectToolbarKey:toolbarKey,
+      toolbarSlot:"trailing",
+      baseWidth:28,
+      baseHeight:28,
+      activate:options.accept,
+      ...shared,
+      priority:priority + 1,
+    });
+    return toolbarKey;
+  }
   function objectChromePosition(box, kind, ignoreKey = "", spec = null, knownPositions = null) {
-    const baseWidth = spec?.baseWidth || (kind === "move" ? 34 : kind === "refine" ? 112 : 36),
+    const baseWidth = spec?.baseWidth || (kind === "move" ? 34 : kind === "refine" ? 92 : 36),
       baseHeight = spec?.baseHeight || 34,
       controlScale = spec?.controlScale || 1,
       width = baseWidth * controlScale,
@@ -3367,101 +4129,55 @@
       chromeGap = 7;
     if (viewportWidth <= 0 || viewportHeight <= 0 || right < -8 || bottom < -8 || screenBox.left > viewportWidth + 8 || screenBox.top > viewportHeight + 8) return null;
     const clampX = (value) => Math.max(6, Math.min(Math.max(6, viewportWidth - width - 6), value)),
-      clampY = (value) => Math.max(6, Math.min(Math.max(6, viewportHeight - height - 6), value)),
-      viewRect = view.getBoundingClientRect?.() || {left:0,top:0},
-      obstacles = [...(globalThis.document?.querySelectorAll?.(".top-row, .toolbar, .animation-controls:not([hidden]), .image-edit-bar:not([hidden]), .selection-context-toolbar, .text-editor, .ai-embodiment, .canvas-agent-control, .object-chrome-button") || [])]
-        .filter(element => element.dataset.objectChromeKey !== ignoreKey && (!spec?.widgetToolGroup || element.dataset.widgetToolGroup !== spec.widgetToolGroup))
-        .map(element => {
-          const rect = element.getBoundingClientRect();
-          return { x:rect.left - viewRect.left, y:rect.top - viewRect.top, w:rect.width, h:rect.height };
-        }),
-      overlapsObstacle = position => obstacles.some(obstacle => position.x < obstacle.x + obstacle.w + 5 && position.x + position.w + 5 > obstacle.x && position.y < obstacle.y + obstacle.h + 5 && position.y + position.h + 5 > obstacle.y),
-      fits = (position, extraBottom = 0) => position.x >= 6 && position.y >= 6 && position.x + position.w <= viewportWidth - 6 && position.y + position.h + extraBottom <= viewportHeight - 6 && !overlapsObstacle(position),
-      fallbackPosition = (position, extraBottom = 0) => ({
-        ...position,
-        x:Math.max(6, Math.min(Math.max(6, viewportWidth - position.w - 6), position.x)),
-        y:Math.max(6, Math.min(Math.max(6, viewportHeight - position.h - extraBottom - 6), position.y)),
-      });
+      clampY = (value) => Math.max(6, Math.min(Math.max(6, viewportHeight - height - 6), value));
+    if (spec?.objectToolbar) {
+      const toolbarWidth = Math.max(spec.minimumWidth || 100, screenBox.width);
+      return { x:screenBox.left, y:screenBox.top - baseHeight, scale:1, baseWidth:toolbarWidth, baseHeight };
+    }
+    if (spec?.objectToolbarItem) {
+      const toolbar = knownPositions?.get?.(spec.objectToolbarKey);
+      if (!toolbar) return null;
+      const toolbarWidth = toolbar.baseWidth * (toolbar.scale || 1),
+        toolbarHeight = toolbar.baseHeight * (toolbar.scale || 1),
+        itemGap = 4,
+        inset = 4,
+        itemY = toolbar.y + (toolbarHeight - height) / 2,
+        leadingX = toolbar.x + inset,
+        trailingX = toolbar.x + toolbarWidth - inset - width;
+      let itemX;
+      if (spec.toolbarSlot === "leading") itemX = leadingX;
+      else if (spec.toolbarSlot === "trailing") itemX = trailingX;
+      else {
+        const itemCount = Math.max(1, Number(spec.toolbarItemCount) || 1),
+          itemOrder = Math.max(0, Math.min(itemCount - 1, Number(spec.toolbarOrder) || 0)),
+          groupWidth = itemCount * width + (itemCount - 1) * itemGap,
+          groupLeft = Math.max(leadingX + width + itemGap, trailingX - itemGap - groupWidth);
+        itemX = groupLeft + itemOrder * (width + itemGap);
+        if (itemX + width > trailingX - itemGap) return null;
+      }
+      return { x:itemX, y:itemY, scale:controlScale, baseWidth, baseHeight };
+    }
     if (spec?.widgetTool) {
       const horizontalWidth = spec.groupHorizontalWidth * controlScale,
         verticalWidth = spec.groupVerticalWidth * controlScale,
         verticalHeight = spec.groupVerticalHeight * controlScale,
-        hintSpace = spec.groupRefineCandidate && widgetRefineHintVisible(spec.groupRefineCandidate) ? 88 : 0,
-        gap = chromeGap * controlScale;
-      if (spec.widgetCoreMoveKey && spec.widgetCoreAcceptKey) {
-        const movePosition = knownPositions?.get?.(spec.widgetCoreMoveKey),
-          acceptPosition = knownPositions?.get?.(spec.widgetCoreAcceptKey);
-        if (!movePosition || !acceptPosition) return null;
-        const moveWidth = movePosition.baseWidth * (movePosition.scale || 1),
-          acceptWidth = acceptPosition.baseWidth * (acceptPosition.scale || 1),
-          acceptHeight = acceptPosition.baseHeight * (acceptPosition.scale || 1),
-          preferred = {
-            side:"move",
-            layout:"horizontal",
-            x:movePosition.x + moveWidth + gap,
-            y:movePosition.y,
-            w:horizontalWidth,
-            h:height,
-          },
-          fitsBetweenCoreControls = Math.abs(movePosition.y - acceptPosition.y) <= 2
-            && preferred.x + preferred.w <= acceptPosition.x - gap
-            && fits(preferred, hintSpace),
-          belowAccept = {
-            side:"accept",
-            layout:"vertical",
-            x:acceptPosition.x + acceptWidth - verticalWidth,
-            y:acceptPosition.y + acceptHeight + gap,
-            w:verticalWidth,
-            h:verticalHeight,
-          },
-          groupPosition = fitsBetweenCoreControls ? preferred : fallbackPosition(belowAccept, hintSpace),
-          vertical = groupPosition.layout === "vertical";
-        return {
-          x:groupPosition.x + (vertical ? groupPosition.w - width : spec.groupHorizontalOffset * controlScale),
-          y:groupPosition.y + (vertical ? spec.groupVerticalOffset * controlScale : 0),
-          scale:controlScale,
-          baseWidth,
-          baseHeight,
-        };
-      }
-      const positions = [
-          { side:"right", layout:"vertical", x:right + gap, y:screenBox.top + screenBox.height / 2 - verticalHeight / 2, w:verticalWidth, h:verticalHeight },
-          { side:"right", layout:"vertical", x:right + gap, y:screenBox.top, w:verticalWidth, h:verticalHeight },
-          { side:"right", layout:"vertical", x:right + gap, y:bottom - verticalHeight, w:verticalWidth, h:verticalHeight },
-          { side:"bottom", layout:"horizontal", x:screenBox.left + screenBox.width / 2 - horizontalWidth / 2, y:bottom + gap, w:horizontalWidth, h:height },
-          { side:"top", layout:"horizontal", x:screenBox.left + screenBox.width / 2 - horizontalWidth / 2, y:screenBox.top - height - gap, w:horizontalWidth, h:height },
-          { side:"left", layout:"vertical", x:screenBox.left - verticalWidth - gap, y:screenBox.top + screenBox.height / 2 - verticalHeight / 2, w:verticalWidth, h:verticalHeight },
-          { side:"left", layout:"vertical", x:screenBox.left - verticalWidth - gap, y:screenBox.top, w:verticalWidth, h:verticalHeight },
-          { side:"left", layout:"vertical", x:screenBox.left - verticalWidth - gap, y:bottom - verticalHeight, w:verticalWidth, h:verticalHeight },
-        ],
-        groupPosition = positions.find(position => fits(position, hintSpace)) || fallbackPosition(positions[0], hintSpace);
-      const vertical = groupPosition.layout === "vertical",
-        alignRight = vertical && groupPosition.side === "left";
+        gap = chromeGap * controlScale,
+        inset = 8,
+        insideLeft = screenBox.left + inset,
+        insideRight = right - inset,
+        insideTop = screenBox.top + inset;
+      const horizontalFits = horizontalWidth <= Math.max(0, insideRight - insideLeft),
+        groupPosition = horizontalFits
+          ? { side:"inside-top", layout:"horizontal", x:insideRight - horizontalWidth, y:insideTop, w:horizontalWidth, h:height }
+          : { side:"inside-right", layout:"vertical", x:Math.max(insideLeft, insideRight - verticalWidth), y:insideTop, w:verticalWidth, h:verticalHeight },
+        vertical = groupPosition.layout === "vertical";
       return {
-        x:groupPosition.x + (vertical ? alignRight ? groupPosition.w - width : 0 : spec.groupHorizontalOffset * controlScale),
+        x:groupPosition.x + (vertical ? groupPosition.w - width : spec.groupHorizontalOffset * controlScale),
         y:groupPosition.y + (vertical ? spec.groupVerticalOffset * controlScale : 0),
         scale:controlScale,
         baseWidth,
         baseHeight,
       };
-    }
-    if (spec?.widgetCore) {
-      const topY = screenBox.top - height - chromeGap,
-        centerY = screenBox.top + screenBox.height / 2 - height / 2,
-        positions = kind === "move" ? [
-          { x:screenBox.left + screenBox.width / 2 - width / 2, y:topY, w:width, h:height },
-          { x:screenBox.left + screenBox.width / 2 - width / 2, y:bottom + chromeGap, w:width, h:height },
-        ] : kind === "cancel" ? [
-          { x:screenBox.left, y:topY, w:width, h:height },
-          { x:screenBox.left - width - chromeGap, y:centerY, w:width, h:height },
-          { x:screenBox.left, y:bottom + chromeGap, w:width, h:height },
-        ] : [
-          { x:right - width, y:topY, w:width, h:height },
-          { x:right + chromeGap, y:centerY, w:width, h:height },
-          { x:right - width, y:bottom + chromeGap, w:width, h:height },
-        ],
-        position = positions.find(candidate => fits(candidate)) || fallbackPosition(positions[0]);
-      return { x:position.x, y:position.y, scale:1, baseWidth, baseHeight };
     }
     const above = screenBox.top - height - chromeGap,
       y = clampY(above >= 6 ? above : screenBox.top + chromeGap);
@@ -3477,6 +4193,7 @@
     if (kind === "accept") return t("widgetAccept");
     if (kind === "cancel") return t("cancel");
     if (kind === "copy") return t("copyText");
+    if (kind === "merge") return t("imageMerge");
     if (kind === "refine") return t("widgetRefine");
     if (kind === "favorite") return window.PenEchoCommunityUI?.label?.("favoriteWidget") || "Favorite Widget";
     if (kind === "share") return window.PenEchoCommunityUI?.label?.("shareWidget") || "Share Widget";
@@ -3516,6 +4233,8 @@
       yes.className = "widget-refine-confirmation-button confirm";
       no.className = "widget-refine-confirmation-button cancel";
       yes.type = no.type = "button";
+      peButton(yes, "secondary", "compact");
+      peButton(no, "secondary", "compact");
       yes.innerHTML = OBJECT_CHROME_ICONS.accept;
       no.innerHTML = OBJECT_CHROME_ICONS.cancel;
       yes.setAttribute("aria-label", t("widgetRefineConfirm"));
@@ -3537,10 +4256,10 @@
       height = Math.max(42, element.offsetHeight || 42),
       screenBox = screenObjectBox(widgetBox(widget)),
       fallbackAnchor = {
-        x:screenBox.left + screenBox.width / 2 - 56,
+        x:screenBox.left + screenBox.width / 2 - 46,
         y:Math.max(8, screenBox.top - 41),
-        width:112,
-        height:34,
+        width:92,
+        height:28,
       },
       position = widgetRefineConfirmationPosition(confirmation.anchor || fallbackAnchor, layoutWidth, height, view.clientWidth, view.clientHeight);
     declaration?.setProperty("--widget-refine-confirm-x", `${position.x.toFixed(1)}px`);
@@ -3561,13 +4280,6 @@
       started = beginImageGesture(event, point, { image:spec.object, hit:"move" });
     } else if (spec.target === "animation") {
       started = beginAnimationGesture(event, point, { animation:spec.object, hit:"move" });
-    } else if (spec.target === "text-box") {
-      const item = spec.object;
-      if (item && state.textBoxes.includes(item)) {
-        recordTextBoxesBefore();
-        state.textBoxGesture = { id:event.pointerId, item, startClientX:event.clientX, startClientY:event.clientY, startX:item.x, startY:item.y, changed:false };
-        started = true;
-      }
     }
     if (!started) return false;
     try { objectChromeLayer.setPointerCapture(event.pointerId); } catch {}
@@ -3584,61 +4296,37 @@
     if (state.widgetGesture?.id === event.pointerId) return finishWidgetGesture(event);
     if (state.imageGesture?.id === event.pointerId) return finishImageGesture(event);
     if (state.animationGesture?.id === event.pointerId) return finishAnimationGesture(event);
-    if (state.textBoxGesture?.id === event.pointerId) return finishTextBoxChromeGesture(event);
     return false;
   }
-  function updateTextBoxChromeGesture(event) {
-    const gesture = state.textBoxGesture;
-    if (!gesture || gesture.id !== event.pointerId || !state.textBoxes.includes(gesture.item)) return false;
-    const item = gesture.item,
-      scale = Math.max(.03, state.scale),
-      x = Math.max(0, Math.min(SIZE - item.w, gesture.startX + (event.clientX - gesture.startClientX) / scale)),
-      y = Math.max(0, Math.min(SIZE - item.h, gesture.startY + (event.clientY - gesture.startClientY) / scale));
-    if (x === item.x && y === item.y) return true;
-    item.x = x;
-    item.y = y;
-    gesture.changed = true;
-    requestRender();
-    return true;
-  }
-  function finishTextBoxChromeGesture(event) {
-    const gesture = state.textBoxGesture;
-    if (!gesture || gesture.id !== event.pointerId) return false;
-    state.textBoxGesture = null;
-    if (gesture.changed) {
-      state.userRevision++;
-      state.dirtyTextBoxIds.add(gesture.item.id);
-      recomputeDirtyBounds();
-      state.autoEligible = true;
-      save();
-      const refineCandidate = latchWidgetRefineCandidate(gesture.item, "text-box");
-      if (state.auto && !refineCandidate) schedule(Math.max(1000, state.autoDelayMs));
-      if (refineCandidate) setStatusKey("widgetRefinePending");
-      refreshHandObjectToolbar();
-    } else {
-      state.textBoxHistoryBefore = null;
-      editTextBox(gesture.item);
-    }
-    requestRender();
-    return true;
-  }
-  function createObjectChromeButton(key, kind) {
+  function createObjectChromeButton(key, kind, spec = null) {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `object-chrome-button ${kind}`;
+    if (kind !== "toolbar" && !spec?.standaloneDraftControl) peButton(button, kind === "delete" ? "danger" : kind === "refine" ? "secondary" : "toolbar", "compact");
+    button.className = kind === "toolbar" ? "object-chrome-button" : `object-chrome-button ${kind}`;
     button.dataset.objectChromeKey = key;
-    button.innerHTML = ["copy", "refine", "favorite", "share", "download"].includes(kind) ? `${OBJECT_CHROME_ICONS[kind]}<span class="object-chrome-label"></span>${kind === "refine" ? '<span class="widget-refine-hint" hidden></span>' : ""}` : OBJECT_CHROME_ICONS[kind];
+    button.innerHTML = OBJECT_CHROME_ICONS[kind] || "";
+    if (kind === "refine") {
+      const label = document.createElement("span"),
+        hint = document.createElement("span");
+      button.dataset.peMaterial = "control-glass";
+      button.dataset.peState = "default";
+      label.className = "widget-refine-button-label";
+      hint.className = "widget-refine-hint";
+      hint.hidden = true;
+      button.append(label, hint);
+    }
     ensureObjectChromeStyleRule(button);
     button.addEventListener("pointerdown", (event) => {
       event.preventDefault();
       event.stopPropagation();
       finishStaleWidgetHostGesture(event);
+      const dragSurface = kind === "move" || kind === "toolbar";
       if (button.penechoSpec?.handToolbar) {
         beginHandToolbarOperation(event.pointerId, button.penechoSpec.handToolbarKey);
-        if (kind === "move") activateHandObjectToolbar(button.penechoSpec.handToolbarKey);
+        if (dragSurface) activateHandObjectToolbar(button.penechoSpec.handToolbarKey);
         refreshHandObjectToolbar(button.penechoSpec.handToolbarKey);
       }
-      if (kind !== "move") {
+      if (!dragSurface) {
         try { button.setPointerCapture(event.pointerId); } catch {}
         return;
       }
@@ -3647,7 +4335,7 @@
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      if (kind === "move" || button.disabled) return;
+      if (kind === "move" || kind === "toolbar" || button.disabled) return;
       if (kind === "refine") triggerWidgetRefineClickPulse(button.penechoSpec?.refineCandidate?.widgetId);
       button.penechoSpec?.activate?.(button);
     });
@@ -3720,18 +4408,52 @@
   function pendingChromeSpecs(specs, pending) {
     if (!pending) return;
     const add = (key, box, itemIndex = null, target = pending) => {
-      specs.push({ key:`${key}:move`, kind:"move", box, target:"pending", itemIndex, object:target, priority:4 });
-      specs.push({ key:`${key}:cancel`, kind:"cancel", box, activate:() => itemIndex === null ? rejectPending() : rejectPendingItem(itemIndex), priority:5 });
-      specs.push({ key:`${key}:accept`, kind:"accept", box, activate:() => itemIndex === null ? acceptPending({ showHint:true }) : acceptPendingItem(itemIndex), priority:5 });
-      if (pendingCopyable(target)) specs.push({ key:`${key}:copy`, kind:"copy", box, activate:() => void copyPendingText(itemIndex), priority:5 });
+      const plotExpression = target?.command?.tool === "plot_function" && typeof target.command.expression === "string"
+        ? target.command.expression.trim()
+        : "",
+        contentCommand = target?.command || target?.textCommand || {},
+        standaloneDraftControl = ["write_text", "draw_formula", "draw"].includes(contentCommand.tool);
+      if (plotExpression) {
+        const toolbarKey = addObjectToolbarSpecs(specs, {
+          prefix:key,
+          box,
+          target:"pending",
+          object:target,
+          cancelLabel:t("cancel"),
+          acceptLabel:t("widgetAccept"),
+          cancel:() => itemIndex === null ? rejectPending() : rejectPendingItem(itemIndex),
+          accept:() => itemIndex === null ? acceptPending({ showHint:true }) : acceptPendingItem(itemIndex),
+          shared:{ itemIndex },
+          priority:4,
+        });
+        specs.push({
+          key:`${key}:copy`,
+          kind:"copy",
+          label:t("copyText"),
+          box,
+          objectToolbarItem:true,
+          objectToolbarKey:toolbarKey,
+          toolbarSlot:"tool",
+          toolbarOrder:0,
+          toolbarItemCount:1,
+          baseWidth:28,
+          baseHeight:28,
+          activate:() => void copyPendingText(itemIndex),
+          priority:6,
+        });
+        return;
+      }
+      specs.push({ key:`${key}:move`, kind:"move", box, target:"pending", itemIndex, object:target, standaloneDraftControl, priority:4 });
+      specs.push({ key:`${key}:cancel`, kind:"cancel", box, standaloneDraftControl, activate:() => itemIndex === null ? rejectPending() : rejectPendingItem(itemIndex), priority:5 });
+      specs.push({ key:`${key}:accept`, kind:"accept", box, standaloneDraftControl, activate:() => itemIndex === null ? acceptPending({ showHint:true }) : acceptPendingItem(itemIndex), priority:5 });
+      if (pendingCopyable(target)) specs.push({ key:`${key}:copy`, kind:"copy", box, standaloneDraftControl, activate:() => void copyPendingText(itemIndex), priority:5 });
     };
     if (pending.items) pending.items.forEach((item, index) => add(`pending-item:${index}`, pendingItemBounds(item), index, item));
     else add("pending", draftBounds(pending));
   }
   function objectChromeSpecs() {
     const persistentCandidate = currentWidgetRefineCandidate(),
-      hoverCandidate = currentWidgetRefineHoverCandidate(),
-      editWidget = state.mode === "hand" && state.widgetEdit ? selectedWidget() : null;
+      hoverCandidate = currentWidgetRefineHoverCandidate();
     if (state.mode !== "hand") {
       const specs = [];
       if (persistentCandidate) addWidgetToolSpecs(specs, persistentCandidate.widget, { refine:persistentCandidate });
@@ -3743,10 +4465,62 @@
       const handTarget = handToolbarObject(record),
         shared = { handToolbar:true, handToolbarKey:key, handToolbarHiding:Boolean(record.hiding) };
       if (!handTarget) continue;
-      if (record.kind === "text-box" && !state.textEditors.size) {
-        specs.push({ key:`text-box:${handTarget.id}:move`, kind:"move", box:textBoxBox(handTarget), target:"text-box", object:handTarget, ...shared, priority:2 });
-      } else if (record.kind === "image") {
-        specs.push({ key:`image:${handTarget.id}:move`, kind:"move", box:imageBox(handTarget), target:"image", object:handTarget, ...shared, priority:2 });
+      if (record.kind === "image") {
+        if (!record.expanded || state.handToolbarActiveKey !== key || state.pendingWidget) continue;
+        const box = imageBox(handTarget),
+          plotExpression = typeof handTarget.plotExpression === "string" ? handTarget.plotExpression : "",
+          toolbarKey = addObjectToolbarSpecs(specs, {
+            prefix:`image:${handTarget.id}`,
+            box,
+            target:"image",
+            object:handTarget,
+            cancelLabel:t("imageDelete"),
+            acceptLabel:t("imagePlace"),
+            acceptTooltip:t("imagePlaceHint"),
+            cancel:() => deleteImage(handTarget),
+            accept:() => {
+              if (state.imageEdit?.id !== handTarget.id) beginImageEdit(handTarget);
+              return acceptImageEdit({ showHint:true });
+            },
+            shared,
+            priority:2,
+          });
+        if (plotExpression) {
+          specs.push({
+            key:`image:${handTarget.id}:copy`,
+            kind:"copy",
+            label:t("copyText"),
+            box,
+            objectToolbarItem:true,
+            objectToolbarKey:toolbarKey,
+            toolbarSlot:"tool",
+            toolbarOrder:0,
+            toolbarItemCount:1,
+            baseWidth:28,
+            baseHeight:28,
+            activate:() => void copyPlotExpression(handTarget),
+            ...shared,
+            priority:3,
+          });
+        } else {
+          specs.push({
+            key:`image:${handTarget.id}:merge`,
+            kind:"merge",
+            label:t("imageMerge"),
+            tooltip:t("imageMergeHint"),
+            box,
+            objectToolbarItem:true,
+            objectToolbarKey:toolbarKey,
+            toolbarSlot:"tool",
+            toolbarOrder:0,
+            toolbarItemCount:1,
+            baseWidth:28,
+            baseHeight:28,
+            activate:() => mergeImage(handTarget, { showHint:true }),
+            ...shared,
+            priority:3,
+          });
+        }
       } else if (record.kind === "animation") {
         const box = animationBox(handTarget);
         specs.push({ key:`animation:${handTarget.id}:move`, kind:"move", box, target:"animation", object:handTarget, ...shared, priority:2 });
@@ -3755,58 +4529,90 @@
           specs.push({ key:`animation:${handTarget.id}:accept`, kind:"accept", box, activate:() => acceptAnimationEdit({ showHint:true }), ...shared, priority:3 });
         }
       } else if (record.kind === "widget") {
+        if (!record.expanded || state.handToolbarActiveKey !== key || state.pendingWidget) continue;
         const box = widgetBox(handTarget),
-          widgetToolGroup = `widget-${handTarget.id}-tools`;
-        specs.push({ key:`widget:${handTarget.id}:move`, kind:"move", box, target:"widget", object:handTarget, widgetCore:true, widgetToolGroup, ...shared, priority:2 });
-        if (record.expanded && state.handToolbarActiveKey === key && state.widgetEdit?.id === handTarget.id && editWidget === handTarget) {
-          specs.push({ key:`widget:${handTarget.id}:cancel`, kind:"cancel", box, widgetCore:true, widgetToolGroup, activate:() => deleteWidget(handTarget), ...shared, priority:3 });
-          specs.push({ key:`widget:${handTarget.id}:accept`, kind:"accept", box, widgetCore:true, widgetToolGroup, activate:() => acceptWidgetEdit({ showHint:true }), ...shared, priority:3 });
-          addWidgetToolSpecs(specs, handTarget, {
-            copy:true,
-            community:true,
-            download:true,
-            handToolbar:true,
-            handToolbarKey:key,
-            handToolbarHiding:Boolean(record.hiding),
-            widgetCoreMoveKey:`widget:${handTarget.id}:move`,
-            widgetCoreAcceptKey:`widget:${handTarget.id}:accept`,
+          toolbarKey = addObjectToolbarSpecs(specs, {
+            prefix:`widget:${handTarget.id}`,
+            box,
+            target:"widget",
+            object:handTarget,
+            cancelLabel:t("widgetDelete"),
+            acceptLabel:t("widgetAccept"),
+            cancel:() => deleteWidget(handTarget),
+            accept:() => {
+              if (state.widgetEdit?.id !== handTarget.id) beginWidgetEdit(handTarget);
+              return acceptWidgetEdit({ showHint:true });
+            },
+            shared,
+            priority:2,
           });
-        }
+        addWidgetToolSpecs(specs, handTarget, {
+          copy:true,
+          community:true,
+          download:true,
+          handToolbar:true,
+          handToolbarKey:key,
+          handToolbarHiding:Boolean(record.hiding),
+          objectToolbarKey:toolbarKey,
+        });
       }
     }
     pendingChromeSpecs(specs, state.pending);
     if (state.pendingWidget) {
       const widget = state.pendingWidget,
         box = widgetBox(widget),
-        widgetToolGroup = `widget-${widget.id}-tools`;
-      specs.push({ key:`pending-widget:${widget.id}:move`, kind:"move", box, target:"pending-widget", object:widget, widgetCore:true, widgetToolGroup, priority:4 });
-      specs.push({ key:`pending-widget:${widget.id}:cancel`, kind:"cancel", box, widgetCore:true, widgetToolGroup, activate:rejectPendingWidget, priority:5 });
-      specs.push({ key:`pending-widget:${widget.id}:accept`, kind:"accept", box, widgetCore:true, widgetToolGroup, activate:() => acceptPendingWidget({ showHint:true }), priority:5 });
+        toolbarKey = addObjectToolbarSpecs(specs, {
+          prefix:`pending-widget:${widget.id}`,
+          box,
+          target:"pending-widget",
+          object:widget,
+          cancelLabel:t("widgetDiscard"),
+          acceptLabel:t("widgetAccept"),
+          cancel:rejectPendingWidget,
+          accept:() => acceptPendingWidget({ showHint:true }),
+          priority:4,
+        });
       addWidgetToolSpecs(specs, widget, {
         copy:true,
         download:true,
-        widgetCoreMoveKey:`pending-widget:${widget.id}:move`,
-        widgetCoreAcceptKey:`pending-widget:${widget.id}:accept`,
+        objectToolbarKey:toolbarKey,
       });
     }
-    return specs;
+    return finalizeObjectToolbarWidths(specs);
   }
   function syncObjectChrome() {
     if (!objectChromeLayer) return;
     const active = new Set();
     const knownPositions = new Map();
+    const attachedWidgetShells = new Set();
+    let selectedWidgetMaterialRecord = null;
     let removedHoveredRefineButton = false;
     for (const spec of objectChromeSpecs()) {
-      const button = objectChromeButtons.get(spec.key) || createObjectChromeButton(spec.key, spec.kind),
+      const button = objectChromeButtons.get(spec.key) || createObjectChromeButton(spec.key, spec.kind, spec),
         position = objectChromePosition(spec.box, spec.kind, spec.key, spec, knownPositions);
       if (!position) continue;
       knownPositions.set(spec.key, position);
+      if (spec.objectToolbar && spec.object?.shell) {
+        attachedWidgetShells.add(spec.object.shell);
+        if (["widget", "pending-widget"].includes(spec.target)) selectedWidgetMaterialRecord = { spec, position };
+      }
       active.add(spec.key);
       const label = objectChromeLabel(spec.kind, spec),
+        copyConfirmed = spec.kind === "copy" && button.dataset.copyState === "copied",
         declaration = (button.penechoStyleRule || ensureObjectChromeStyleRule(button))?.["style"];
       button.penechoSpec = spec;
+      if (spec.objectToolbar || spec.standaloneDraftControl) {
+        button.removeAttribute("data-pe-button");
+        button.removeAttribute("data-pe-density");
+      } else peButton(button, spec.kind === "delete" ? "danger" : spec.kind === "refine" ? "secondary" : "toolbar", "compact");
+      button.classList.toggle("standalone-draft-control", Boolean(spec.standaloneDraftControl));
       button.classList.toggle("widget-tool", Boolean(spec.widgetTool));
-      button.classList.toggle("icon-only", Boolean(spec.iconOnly));
+      button.classList.toggle("widget-chrome-control", Boolean(spec.widgetTool || spec.objectToolbar || spec.objectToolbarItem));
+      button.classList.toggle("object-toolbar-surface", Boolean(spec.objectToolbar));
+      button.classList.toggle("object-toolbar-shell", Boolean(spec.objectToolbar));
+      button.classList.toggle("widget-object-toolbar", Boolean(spec.objectToolbar && ["widget", "pending-widget"].includes(spec.target)));
+      button.classList.toggle("object-toolbar-item", Boolean(spec.objectToolbarItem));
+      button.classList.toggle("icon-only", Boolean(spec.iconOnly || spec.objectToolbarItem));
       button.classList.toggle("solo-widget-tool", Boolean(spec.widgetTool && spec.groupItemCount === 1));
       button.classList.toggle("hand-toolbar-control", Boolean(spec.handToolbar));
       button.classList.toggle("hand-toolbar-hiding", Boolean(spec.handToolbar && spec.handToolbarHiding));
@@ -3816,20 +4622,21 @@
       button.classList.toggle("refine-hovered", Boolean(spec.refineCandidate && widgetRefineHintHovered(spec.refineCandidate)));
       if (spec.widgetToolGroup) button.dataset.widgetToolGroup = spec.widgetToolGroup;
       else delete button.dataset.widgetToolGroup;
-      button.setAttribute("aria-label", label);
+      button.setAttribute("aria-label", copyConfirmed ? t("widgetSourceCopied") : label);
       button.disabled = Boolean(spec.busy);
       if (spec.kind === "favorite") button.setAttribute("aria-pressed", String(Boolean(spec.pressed)));
       else button.removeAttribute("aria-pressed");
       if (spec.busy) button.setAttribute("aria-busy", "true");
       else button.removeAttribute("aria-busy");
-      if (spec.kind === "refine") button.removeAttribute("title");
-      else button.title = label;
-      if (["copy", "refine", "favorite", "share", "download"].includes(spec.kind)) button.querySelector(".object-chrome-label").textContent = label;
+      if (spec.kind === "refine" || spec.objectToolbar) button.removeAttribute("title");
+      else button.title = spec.tooltip || label;
       if (spec.kind === "refine") {
-        const hint = button.querySelector(".widget-refine-hint"),
+        const buttonLabel = button.querySelector(".widget-refine-button-label"),
+          hint = button.querySelector(".widget-refine-hint"),
           visible = widgetRefineHintVisible(spec.refineCandidate),
           hintWidth = Math.min(320, Math.max(120, view.clientWidth - 24)),
           hintLeft = Math.max(12, Math.min(Math.max(12, view.clientWidth - hintWidth - 12), position.x)) - position.x;
+        buttonLabel.textContent = label;
         hint.textContent = t(spec.refineCandidate?.hintKey || "widgetRefineHint");
         hint.hidden = !visible;
         declaration?.setProperty("--refine-hint-left", `${hintLeft.toFixed(1)}px`);
@@ -3841,6 +4648,10 @@
       declaration?.setProperty("--object-control-height", `${position.baseHeight}px`);
       declaration?.setProperty("z-index", String(spec.priority || 1));
     }
+    for (const widget of [...state.widgets, ...(state.pendingWidget ? [state.pendingWidget] : [])]) {
+      widget.shell?.classList.toggle("object-toolbar-attached", attachedWidgetShells.has(widget.shell));
+    }
+    syncSelectedWidgetMaterial(selectedWidgetMaterialRecord);
     for (const [key, button] of objectChromeButtons) {
       if (active.has(key)) continue;
       if (button.penechoSpec?.kind === "refine"
@@ -3849,11 +4660,43 @@
         removedHoveredRefineButton = true;
       }
       removeObjectChromeStyleRule(button);
+      button._copyGeneration = (button._copyGeneration || 0) + 1;
+      clearTimeout(button._copyIconResetTimer);
       button.remove();
       objectChromeButtons.delete(key);
     }
     if (removedHoveredRefineButton) requestInteractionLayerRender();
     syncWidgetRefineConfirmation();
+  }
+  function syncSelectedWidgetMaterial(record) {
+    if (!selectedWidgetMaterial) return;
+    if (!record) {
+      selectedWidgetMaterial.hidden = true;
+      selectedWidgetMaterial.classList.remove("hand-toolbar-hiding");
+      syncWidgetLayerOrder();
+      syncCanvasObjectLayerOrder();
+      return;
+    }
+    const { spec, position } = record,
+      screenBox = screenObjectBox(spec.box),
+      toolbarWidth = Math.max(screenBox.width, position.baseWidth || 0),
+      toolbarHeight = position.baseHeight || 34,
+      materialX = position.x - state.panX,
+      materialY = position.y - state.panY,
+      widgetStackIndex = state.widgets.length + (state.pendingWidget ? 2 : 1),
+      declaration = runtimeElementStyle(selectedWidgetMaterial, "selected-widget-material");
+    selectedWidgetMaterial.hidden = false;
+    selectedWidgetMaterial.classList.toggle("hand-toolbar-hiding", Boolean(spec.handToolbar && spec.handToolbarHiding));
+    syncWidgetLayerOrder();
+    if (spec.object?.styleRule?.style) spec.object.styleRule.style.zIndex = String(widgetStackIndex);
+    syncCanvasObjectLayerOrder();
+    declaration?.setProperty("--selected-widget-material-x", `${materialX.toFixed(1)}px`);
+    declaration?.setProperty("--selected-widget-material-y", `${materialY.toFixed(1)}px`);
+    declaration?.setProperty("--selected-widget-material-width", `${toolbarWidth.toFixed(1)}px`);
+    declaration?.setProperty("--selected-widget-material-height", `${(toolbarHeight + screenBox.height).toFixed(1)}px`);
+    declaration?.setProperty("--selected-widget-body-width", `${screenBox.width.toFixed(1)}px`);
+    declaration?.setProperty("--selected-widget-toolbar-height", `${toolbarHeight.toFixed(1)}px`);
+    declaration?.setProperty("z-index", String(widgetStackIndex));
   }
   objectChromeLayer?.addEventListener("pointermove", (event) => {
     if (finishReleasedWidgetGesture(event)) return;
@@ -3863,13 +4706,12 @@
     else if (state.widgetGesture?.id === event.pointerId) updateWidgetGesture(event);
     else if (state.imageGesture?.id === event.pointerId) updateImageGesture(event);
     else if (state.animationGesture?.id === event.pointerId) updateAnimationGesture(event);
-    else if (state.textBoxGesture?.id === event.pointerId) updateTextBoxChromeGesture(event);
   });
   objectChromeLayer?.addEventListener("pointerup", finishObjectChromeGesture);
   objectChromeLayer?.addEventListener("pointercancel", finishObjectChromeGesture);
   function drawPointerPreview(context) {
     const preview = state.pointerPreview;
-    if (!preview || state.mode !== "eraser" || !valid(preview)) return;
+    if (!preview || state.mode !== "eraser" && !state.drawing?.erase || !valid(preview)) return;
     const radius = logicalWidth(state.eraser) / 2,
       unit = 1 / state.scale;
     context.save();
@@ -3896,7 +4738,8 @@
   }
   function renderInteractionLayer() {
     const d = devicePixelRatio || 1,
-      r = view.getBoundingClientRect();
+      metrics = canvasViewportMetrics(),
+      r = { width:metrics.width, height:metrics.height };
     interactionCtx.setTransform(d, 0, 0, d, 0, 0);
     interactionCtx.clearRect(0, 0, r.width, r.height);
     interactionCtx.save();
@@ -3936,14 +4779,40 @@
     drawImageChrome(interactionCtx);
     interactionCtx.restore();
     positionAnimationControls();
-    positionImageEditBar();
+    positionImageSelectionMaterial();
     syncObjectChrome();
   }
   function clientPoint(e) {
-    const r = view.getBoundingClientRect();
+    const point = canvasClientPosition(e.clientX, e.clientY);
     return {
-      x: (e.clientX - r.left - state.panX) / state.scale,
-      y: (e.clientY - r.top - state.panY) / state.scale,
+      x: (point.x - state.panX) / state.scale,
+      y: (point.y - state.panY) / state.scale,
+    };
+  }
+  function captureDrawingTransform() {
+    const metrics = canvasViewportMetrics();
+    return {
+      left:metrics.rect.left,
+      top:metrics.rect.top,
+      clientScaleX:metrics.clientScaleX,
+      clientScaleY:metrics.clientScaleY,
+      panX:state.panX,
+      panY:state.panY,
+      scale:state.scale,
+    };
+  }
+  function captureDrawingInput(event) {
+    const inputTransform = captureDrawingTransform();
+    return {
+      inputTransform,
+      point:drawingClientPoint({ inputTransform }, event),
+    };
+  }
+  function drawingClientPoint(drawing, event) {
+    const transform = drawing.inputTransform;
+    return {
+      x:((Number(event.clientX) - transform.left) * transform.clientScaleX - transform.panX) / transform.scale,
+      y:((Number(event.clientY) - transform.top) * transform.clientScaleY - transform.panY) / transform.scale,
     };
   }
   function blockCanvasInput(duration = 1000) {
@@ -4152,8 +5021,13 @@
     return { left: editor.x * state.scale + state.panX, top: editor.y * state.scale + state.panY };
   }
   function textEditorViewportSize() {
-    const rect = view.getBoundingClientRect();
-    return { width: rect.width, height: rect.height };
+    const { width, height } = canvasViewportMetrics(),
+      agent = document.querySelector("#canvasAgentPanel"),
+      agentRect = agent && !agent.hidden && document.body.classList.contains("studio-agent-docked")
+        ? canvasElementLayoutRect(agent)
+        : null,
+      visibleWidth = agentRect?.left > 0 ? Math.min(width, agentRect.left) : width;
+    return { width:visibleWidth, height };
   }
   function resizeTextEditorDimensions(gesture, hit, dx, dy, minWidth, minHeight, maxWidth, maxHeight) {
     const startWidth = gesture.startWidth,
@@ -4220,6 +5094,8 @@
         else declaration.removeProperty("--text-editor-preview-width");
         if (editor.previewLogicalHeight) declaration.setProperty("--text-editor-preview-height", `${editor.previewLogicalHeight}px`);
         else declaration.removeProperty("--text-editor-preview-height");
+        declaration.setProperty("--text-editor-preview-inset-x", `${editor.previewInsetX || 0}px`);
+        declaration.setProperty("--text-editor-preview-inset-y", `${editor.previewInsetY || 0}px`);
       }
       editor.element.classList.toggle("active", active);
     }
@@ -4254,6 +5130,7 @@
   }
   function focusTextEditor(editor, input = false) {
     if (!editor) return;
+    setCanvasObjectFrontKind("text-box");
     state.activeTextEditorId = editor.id;
     editor.zIndex = ++state.nextTextEditorZ;
     positionTextEditors();
@@ -4280,8 +5157,9 @@
   function updateTextEditorGesture(event, editor) {
     const gesture = editor.gesture;
     if (!gesture || gesture.id !== event.pointerId) return;
-    const dx = event.clientX - gesture.startClientX,
-      dy = event.clientY - gesture.startClientY,
+    const delta = canvasClientDelta(event.clientX - gesture.startClientX, event.clientY - gesture.startClientY),
+      dx = delta.x,
+      dy = delta.y,
       viewport = textEditorViewportSize();
     if (gesture.hit === "move") {
       editor.x = gesture.startX + dx / Math.max(0.03, state.scale);
@@ -4309,6 +5187,7 @@
   }
   function textEditorButton(button, key, className) {
     button.type = "button";
+    peButton(button, "toolbar", "compact");
     button.className = `text-editor-button ${className || ""}`;
     button.dataset.i18nTitle = key;
     button.dataset.i18nAria = key;
@@ -4357,27 +5236,65 @@
     editor.preview.removeAttribute("data-fallback");
     editor.previewLogicalWidth = 0;
     editor.previewLogicalHeight = 0;
+    editor.previewInsetX = 0;
+    editor.previewInsetY = 0;
+  }
+  function textEditorContentMetrics(editor) {
+    const body = editor?.body || editor?.element?.querySelector(".text-editor-body"),
+      editorRect = canvasElementLayoutRect(editor?.element),
+      bodyRect = canvasElementLayoutRect(body),
+      style = body && window.getComputedStyle ? window.getComputedStyle(body) : null,
+      paddingLeft = Number.parseFloat(style?.paddingLeft) || 10,
+      paddingRight = Number.parseFloat(style?.paddingRight) || 10,
+      paddingTop = Number.parseFloat(style?.paddingTop) || 10,
+      fallbackLeft = (body?.offsetLeft || 0) + paddingLeft,
+      fallbackTop = (body?.offsetTop || 34) + paddingTop,
+      fallbackWidth = Math.max(1, editor.widthCss - paddingLeft - paddingRight - 2);
+    if (!editorRect || !bodyRect) return { x:fallbackLeft, y:fallbackTop, width:fallbackWidth };
+    return {
+      x:bodyRect.left - editorRect.left + paddingLeft,
+      y:bodyRect.top - editorRect.top + paddingTop,
+      width:Math.max(1, bodyRect.width - paddingLeft - paddingRight),
+    };
+  }
+  function textBoxOriginFromEditor(editor, contentMetrics, contentInset, scale) {
+    const editorScale = Math.max(0.03, Number(scale) || 0);
+    return {
+      x:editor.x + contentMetrics.x / editorScale - contentInset.x,
+      y:editor.y + contentMetrics.y / editorScale - contentInset.y,
+    };
+  }
+  function textEditorOriginFromTextBox(item, contentMetrics, contentInset, scale) {
+    const editorScale = Math.max(0.03, Number(scale) || 0);
+    return {
+      x:item.x + contentInset.x - contentMetrics.x / editorScale,
+      y:item.y + contentInset.y - contentMetrics.y / editorScale,
+    };
   }
   async function renderTextEditorPreview(editor) {
     if (!editor || !editor.mixedMode || editor.committing || editor.cancelled || state.textEditors.get(editor.id) !== editor) return;
     const revision = ++editor.previewRevision,
       text = editor.textarea.value,
       fontCss = editor.fontCss,
-      maxWidth = Math.max(fontCss * 3, editor.widthCss - 16),
+      contentMetrics = textEditorContentMetrics(editor),
+      maxWidth = Math.max(fontCss * 3, contentMetrics.width),
       color = editor.color || state.inkColor;
     editor.preview.setAttribute("aria-busy", "true");
     let image,
       fallback = false;
     try {
-      image = await mixedTextImage(text, fontCss, color, maxWidth, 1.35, TEXT_EDITOR_FONT_FAMILY, Math.min(3, devicePixelRatio || 1));
+      image = await mixedTextImage(text, fontCss, color, maxWidth, 1.35, editor.fontFamily, Math.min(3, devicePixelRatio || 1));
     } catch {
-      image = textImage(text, fontCss, color, maxWidth, 1.35, TEXT_EDITOR_FONT_FAMILY, TEXT_INPUT_MAX_LENGTH, Math.min(3, devicePixelRatio || 1));
+      image = textImage(text, fontCss, color, maxWidth, 1.35, editor.fontFamily, TEXT_INPUT_MAX_LENGTH, Math.min(3, devicePixelRatio || 1));
       fallback = true;
     }
     if (editor.cancelled || editor.committing || !editor.mixedMode || editor.previewRevision !== revision || state.textEditors.get(editor.id) !== editor) return;
     image.classList.add("text-editor-preview-canvas");
     editor.previewLogicalWidth = image.logicalWidth || image.width;
     editor.previewLogicalHeight = image.logicalHeight || image.height;
+    const previewInset = textImageContentInset(image);
+    editor.previewInsetX = previewInset.x;
+    editor.previewInsetY = previewInset.y;
     editor.preview.replaceChildren(image);
     editor.preview.toggleAttribute("data-fallback", fallback);
     editor.preview.setAttribute("aria-label", text || t("textPreview"));
@@ -4437,13 +5354,6 @@
     textHelpInvoker = null;
     if (invoker?.isConnected && !invoker.disabled) invoker.focus({ preventScroll: true });
   }
-  function textEditorContentOffset(editor) {
-    const body = editor?.body || editor?.element?.querySelector(".text-editor-body"),
-      left = body?.offsetLeft || 0,
-      top = body?.offsetTop || 36;
-    return { x: left + 8, y: top + 8 };
-  }
-
   async function confirmTextEditor(editor, options = null) {
     options ||= {};
     if (!editor) return;
@@ -4464,19 +5374,17 @@
       clearTimeout(state.timer);
       state.timer = 0;
       editor.element.querySelectorAll("button").forEach((button) => (button.disabled = true));
-      const contentOffset = textEditorContentOffset(editor),
+      const contentMetrics = textEditorContentMetrics(editor),
         editorScale = Math.max(0.03, state.scale);
-      editor.x += contentOffset.x / editorScale;
-      editor.y += contentOffset.y / editorScale;
       editor.mixedMode = true;
       const proposedFontSize = editor.fontCss / Math.max(0.03, state.scale);
       let fontSize = editor.sourceTextBoxId && !editor.resized ? editor.sourceFontSize : proposedFontSize,
-        proposedMaxWidth = Math.max(fontSize * 3, (editor.widthCss - 16) / Math.max(0.03, state.scale)),
+        proposedMaxWidth = Math.max(fontSize * 3, contentMetrics.width / editorScale),
         color = editor.color || state.inkColor;
       let maxWidth = editor.sourceTextBoxId && !editor.resized ? editor.sourceMaxWidth : proposedMaxWidth,
-        x = editor.sourceTextBoxId && !editor.moved ? editor.sourceX : editor.x,
-        y = editor.sourceTextBoxId && !editor.moved ? editor.sourceY : editor.y;
-      const fitted = await fittedTextBoxContent(text, fontSize, color, maxWidth);
+        x,
+        y;
+      const fitted = await fittedTextBoxContent(text, fontSize, color, maxWidth, editor.fontFamily);
       if (editor.cancelled || state.textEditors.get(editor.id) !== editor) return;
       const image = fitted.image,
         mixedFallback = fitted.mixedFallback,
@@ -4484,6 +5392,11 @@
         height = fitted.height;
       fontSize = fitted.fontSize;
       maxWidth = fitted.maxWidth;
+      const contentInset = textImageContentInset(image),
+        alignedOrigin = textBoxOriginFromEditor(editor, contentMetrics, contentInset, editorScale),
+        preserveSourceOrigin = editor.sourceTextBoxId && !editor.moved && !editor.resized;
+      x = preserveSourceOrigin ? editor.sourceX : alignedOrigin.x;
+      y = preserveSourceOrigin ? editor.sourceY : alignedOrigin.y;
       x = Math.max(0, Math.min(SIZE - width, x));
       y = Math.max(0, Math.min(SIZE - height, y));
       const
@@ -4498,6 +5411,7 @@
         h:height,
         maxWidth,
         fontSize,
+        fontFamily:fitted.fontFamily,
         color,
         text,
         image,
@@ -4514,7 +5428,7 @@
       removeTextEditor(editor);
       blockCanvasInput(TEXT_INPUT_GUARD_MS);
       restoreTextEditorMode(editor);
-      save();
+      saveUserCanvasChange();
       render();
       setStatusKey(mixedFallback ? "textMixedModeError" : "ready");
       if (state.auto && !refineCandidate) schedule(Math.max(1000, state.autoDelayMs));
@@ -4557,7 +5471,7 @@
     if (deletedTextBox) {
       state.userRevision++;
       reconcileDirtyAfterTextBoxDeletion(deletedTextBox);
-      save();
+      saveUserCanvasChange();
     }
     render();
     setStatusKey("ready");
@@ -4584,6 +5498,8 @@
         previewTimer: 0,
         previewLogicalWidth: 0,
         previewLogicalHeight: 0,
+        previewInsetX: 0,
+        previewInsetY: 0,
         committing: false,
         cancelled: false,
         gesture: null,
@@ -4593,6 +5509,7 @@
         sourceY:Number(options.sourceY),
         sourceMaxWidth:Number(options.sourceMaxWidth),
         sourceFontSize:Number(options.sourceFontSize),
+        fontFamily:normalizeTextBoxFontFamily(options.fontFamily),
         moved:false,
         resized:false,
         color:typeof options.color === "string" ? options.color : state.inkColor,
@@ -4617,12 +5534,13 @@
     root.dataset.i18nAria = "text";
     root.setAttribute("role", "dialog");
     root.setAttribute("aria-label", t("text"));
-    header.className = "text-editor-header";
+    header.className = "text-editor-header object-toolbar-shell";
     title.className = "text-editor-title";
     title.dataset.i18n = "text";
     title.textContent = t("text");
     mixedModeButton.className = "text-editor-button mixed-mode";
     mixedModeButton.type = "button";
+    peButton(mixedModeButton, "toolbar", "compact");
     mixedModeButton.dataset.i18n = "textMixedModeShort";
     mixedModeButton.dataset.i18nTitle = "textMixedMode";
     mixedModeButton.dataset.i18nAria = "textMixedMode";
@@ -4635,9 +5553,7 @@
     helpButton.textContent = "?";
     helpButton.setAttribute("aria-haspopup", "dialog");
     helpButton.setAttribute("aria-controls", "textHelpDialog");
-    acceptButton.textContent = "✓";
-    cancelButton.textContent = "×";
-    header.append(title, helpButton, mixedModeButton, acceptButton, cancelButton);
+    header.append(cancelButton, title, helpButton, mixedModeButton, acceptButton);
     body.className = "text-editor-body";
     textarea.className = "text-editor-input";
     textarea.rows = 4;
@@ -4726,18 +5642,20 @@
     if (state.widgetEdit) acceptWidgetEdit();
     if (state.imageEdit) acceptImageEdit({ restoreMode:false });
     if (state.animationEdit) acceptAnimationEdit();
+    bringTextBoxToFront(item);
     state.selectedTextBoxId = item.id;
     const scale = Math.max(.03, state.scale),
       editor = createTextEditor({ x:item.x, y:item.y }, {
         text:item.text,
         widthCss:Math.max(TEXT_EDITOR_MIN_WIDTH, item.maxWidth * scale + 16),
-        heightCss:Math.max(TEXT_EDITOR_MIN_HEIGHT, item.h * scale + 48),
+        heightCss:Math.max(TEXT_EDITOR_MIN_HEIGHT, item.h * scale + 42),
         fontCss:Math.max(8, item.fontSize * scale),
         sourceTextBoxId:item.id,
         sourceX:item.x,
         sourceY:item.y,
         sourceMaxWidth:item.maxWidth,
         sourceFontSize:item.fontSize,
+        fontFamily:item.fontFamily,
         color:item.color,
         returnMode:"hand",
       });
@@ -4745,9 +5663,11 @@
       state.selectedTextBoxId = null;
       return false;
     }
-    const offset = textEditorContentOffset(editor);
-    editor.x -= offset.x / scale;
-    editor.y -= offset.y / scale;
+    const contentMetrics = textEditorContentMetrics(editor),
+      contentInset = textImageContentInset(item.image),
+      editorOrigin = textEditorOriginFromTextBox(item, contentMetrics, contentInset, scale);
+    editor.x = editorOrigin.x;
+    editor.y = editorOrigin.y;
     positionTextEditors();
     setStatusKey("ready");
     render();
@@ -4763,7 +5683,8 @@
   function beginTouchGesture() {
     if (state.navigationLocked || state.touches.size < 2) return;
     const ids = [...state.touches.keys()].slice(0, 2),
-      points = ids.map((id) => state.touches.get(id));
+      screenPoints = ids.map((id) => state.touches.get(id)),
+      points = screenPoints.map((point) => canvasClientPosition(point.x, point.y));
     state.touchGesture = {
       ids,
       center: {
@@ -4786,21 +5707,22 @@
     }
     const points = g.ids.map((id) => state.touches.get(id));
     if (points.some((p) => !p)) return false;
-    const center = {
-        x: (points[0].x + points[1].x) / 2,
-        y: (points[0].y + points[1].y) / 2,
-      },
-      distance = Math.max(1, Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y)),
-      r = view.getBoundingClientRect(),
+    const first = canvasClientPosition(points[0].x, points[0].y),
+      second = canvasClientPosition(points[1].x, points[1].y),
+      center = { x:(first.x + second.x) / 2, y:(first.y + second.y) / 2 },
+      distance = Math.max(1, Math.hypot(first.x - second.x, first.y - second.y)),
       next = Math.max(0.03, Math.min(2, (g.scale * distance) / g.distance)),
-      anchorX = (g.center.x - r.left - g.panX) / g.scale,
-      anchorY = (g.center.y - r.top - g.panY) / g.scale;
+      anchorX = (g.center.x - g.panX) / g.scale,
+      anchorY = (g.center.y - g.panY) / g.scale,
+      previousPanX = state.panX,
+      previousPanY = state.panY,
+      previousScale = state.scale;
     state.scale = next;
-    state.panX = center.x - r.left - anchorX * next;
-    state.panY = center.y - r.top - anchorY * next;
-    updateCoordinates();
+    state.panX = center.x - anchorX * next;
+    state.panY = center.y - anchorY * next;
+    requestCoordinatesUpdate();
     setNavigating(true);
-    render();
+    requestCanvasNavigationPreview(previousPanX, previousPanY, previousScale);
     return true;
   }
   function moveCanvas(dx, dy) {
@@ -4808,10 +5730,12 @@
       setNavigating(true);
       return false;
     }
-    state.panX += dx;
-    state.panY += dy;
-    updateCoordinates();
-    requestRender();
+    const delta = canvasClientDelta(dx, dy),
+      previousPanX = state.panX,
+      previousPanY = state.panY;
+    state.panX += delta.x;
+    state.panY += delta.y;
+    requestCanvasNavigationPreview(previousPanX, previousPanY);
     return true;
   }
   function zoomCanvasAt(clientX, clientY, deltaY) {
@@ -4819,16 +5743,19 @@
       setNavigating(true);
       return false;
     }
-    const rect = view.getBoundingClientRect(),
+    const point = canvasClientPosition(clientX, clientY),
       factor = deltaY < 0 ? 1.12 : 0.89,
       next = Math.max(0.03, Math.min(2, state.scale * factor)),
-      px = clientX - rect.left,
-      py = clientY - rect.top;
+      px = point.x,
+      py = point.y,
+      previousPanX = state.panX,
+      previousPanY = state.panY,
+      previousScale = state.scale;
     state.panX = px - ((px - state.panX) * next) / state.scale;
     state.panY = py - ((py - state.panY) * next) / state.scale;
     state.scale = next;
-    updateCoordinates();
-    requestRender();
+    requestCoordinatesUpdate();
+    requestCanvasNavigationPreview(previousPanX, previousPanY, previousScale);
     wheelNavigating();
     return true;
   }

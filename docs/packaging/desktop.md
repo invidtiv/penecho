@@ -67,7 +67,7 @@ Generated production assets:
 - `build/icons/penecho.icns`
 - `build/icons/penecho.ico`
 
-The website brand icon is applied to the app bundle, Dock/taskbar executable, DMG and Windows setup executable. Squirrel's generic green install animation is replaced with the generated PenEcho-branded `penecho-install.gif`, so first install and update never show an unfamiliar third-party splash.
+The website brand icon is applied to the app bundle, Dock/taskbar executable, DMG and Windows setup executable. Squirrel's generic green install animation is replaced with the generated PenEcho-branded `penecho-install.gif`, so first install and update never show an unfamiliar third-party splash. Its wordmark is derived from checked-in brand artwork instead of build-host fonts, keeping the Windows splash deterministic in isolated cross-platform builds.
 
 ## Signing and notarization
 
@@ -112,7 +112,7 @@ Never commit certificates or credentials.
 
 ## GitHub Releases
 
-Keep source, icon masters, Forge configuration and the workflow in the source branch. Do not commit DMG/EXE/ZIP files to Git. Release binaries belong in a version-specific GitHub Release such as `v1.1.7`.
+Keep source, icon masters, Forge configuration and the workflow in the source branch. Do not commit DMG/EXE/ZIP files to Git. Release binaries belong in a version-specific GitHub Release such as `v1.2.0`.
 
 The workflow can be run manually for private testing. When triggered by a `v*` tag, it creates a **draft** GitHub Release and uploads the installers. Test every installer before publishing the draft.
 
@@ -129,13 +129,13 @@ These paths intentionally do not invoke Electron's native `autoUpdater`, because
 
 Recommended public assets:
 
-- `PenEcho-1.1.7-mac-arm64.dmg`
-- `PenEcho-1.1.7-mac-x64.dmg`
-- `PenEcho-1.1.7-mac-arm64.zip`
-- `PenEcho-1.1.7-mac-x64.zip`
-- `PenEcho-Setup-1.1.7-win-x64.exe`
+- `PenEcho-1.2.0-mac-arm64.dmg`
+- `PenEcho-1.2.0-mac-x64.dmg`
+- `PenEcho-1.2.0-mac-arm64.zip`
+- `PenEcho-1.2.0-mac-x64.zip`
+- `PenEcho-Setup-1.2.0-win-x64.exe`
 - `RELEASES`
-- `penecho-1.1.7-full.nupkg`
+- `penecho-1.2.0-full.nupkg`
 - `SHA256SUMS-<platform>-<arch>.txt`
 
 The DMG and Setup executable are the visible installers. PenEcho uses the macOS ZIP and Windows Setup executable for in-app updates, so those assets must remain attached when the draft is published. `RELEASES` and `.nupkg` remain useful Squirrel release artifacts but are not downloaded by PenEcho's unsigned update path.

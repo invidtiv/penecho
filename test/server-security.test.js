@@ -78,6 +78,18 @@ function claudeServerEnv(fakeCli, overrides = {}) {
   };
 }
 
+async function recoverableCodexCli(directory) {
+  const bin = path.join(directory, "bin"), record = path.join(directory, "codex-invocations.txt"), windows = process.platform === "win32",
+    command = path.join(bin, windows ? "codex.cmd" : "codex"),
+    script = windows ? path.join(bin, "node_modules", "@openai", "codex", "bin", "codex.js") : command,
+    communityMetadata = { name:"Recovered Widget", description:"A Widget whose metadata was generated after Codex CLI recovery.", category:"developer", tags:["codex","recovery"], continuationPrompt:"" };
+  await fs.promises.mkdir(path.dirname(script), { recursive:true });
+  await fs.promises.writeFile(script, `#!${process.execPath}\n"use strict";\nconst fs=require("node:fs");\nconst args=process.argv.slice(2),record=${JSON.stringify(record)};\nif(args[0]==="--version"){fs.appendFileSync(record,"version\\n");process.stdout.write("codex-cli 0.149.1\\n");process.exit(0);}\nif(args[0]==="login"&&args[1]==="status"){fs.appendFileSync(record,"login\\n");process.stdout.write("Logged in\\n");process.exit(0);}\nlet prompt="";process.stdin.setEncoding("utf8");process.stdin.on("data",chunk=>prompt+=chunk);process.stdin.on("end",()=>{const community=prompt.includes("public Craft metadata"),answer=community?${JSON.stringify(JSON.stringify(communityMetadata))}:'{"intent":"answer","observedText":"recovered","message":"Recovered Canvas AI","commands":[]}';fs.appendFileSync(record,community?"community\\n":"canvas\\n");const output=args[args.indexOf("-o")+1];fs.writeFileSync(output,answer);process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:answer}})+"\\n");process.stdout.write(JSON.stringify({type:"turn.completed",usage:{}})+"\\n");});\n`, { mode:0o700 });
+  if (windows) await fs.promises.writeFile(command, "@echo off\r\n", "utf8");
+  else await fs.promises.chmod(command, 0o700);
+  return { bin, command, record, communityMetadata };
+}
+
 function startApiServer(responseContent = '{"intent":"none","commands":[]}', options = {}) {
   const requests = [];
   const server = http.createServer((req, res) => {
@@ -499,7 +511,7 @@ test("canvas settings expose no API secret and save validated configuration for 
     assert.equal(switchedResponse.status, 200);
     const hot = await fetch(`${origin}/api/config`).then(response => response.json());
     assert.equal(hot.aiProvider, "codex-cli");
-    const systemResponse = await fetch(`${origin}/api/settings`, { method:"POST", headers, body:JSON.stringify({ ...current, scope:"system", timeoutSeconds:120, canvasAgentTurnLimit:250, autoDelaySeconds:2.5, imageFormat:"png", requestTrace:true, requestTraceLimit:25 }) });
+    const systemResponse = await fetch(`${origin}/api/settings`, { method:"POST", headers, body:JSON.stringify({ ...current, scope:"system", timeoutSeconds:120, canvasAgentTurnLimit:1000000, autoDelaySeconds:2.5, imageFormat:"png", requestTrace:true, requestTraceLimit:25 }) });
     const system = await systemResponse.json();
     assert.equal(system.restartRequired, true);
     assert.equal(system.providerApplied, false);
@@ -508,13 +520,15 @@ test("canvas settings expose no API secret and save validated configuration for 
     const updatedText = await fs.promises.readFile(path.join(stateDir, "config.env"), "utf8");
     assert.match(updatedText, /^AUTO_AI_DELAY_SECONDS=2\.5$/m);
     assert.match(updatedText, /^MAX_TOKENS=20000$/m);
-    assert.match(updatedText, /^PENECHO_CANVAS_AGENT_TURN_LIMIT=250$/m);
+    assert.match(updatedText, /^PENECHO_CANVAS_AGENT_TURN_LIMIT=1000000$/m);
     const invalidMaxTokens = await fetch(`${origin}/api/settings`, { method:"POST", headers, body:JSON.stringify({ ...current, scope:"system", maxTokens:14999 }) });
     assert.equal(invalidMaxTokens.status, 400);
     const invalidLowTurnLimit = await fetch(`${origin}/api/settings`, { method:"POST", headers, body:JSON.stringify({ ...current, scope:"system", canvasAgentTurnLimit:49 }) });
     assert.equal(invalidLowTurnLimit.status,400);
-    const invalidHighTurnLimit = await fetch(`${origin}/api/settings`, { method:"POST", headers, body:JSON.stringify({ ...current, scope:"system", canvasAgentTurnLimit:501 }) });
-    assert.equal(invalidHighTurnLimit.status,400);
+    const invalidFractionalTurnLimit = await fetch(`${origin}/api/settings`, { method:"POST", headers, body:JSON.stringify({ ...current, scope:"system", canvasAgentTurnLimit:50.5 }) });
+    assert.equal(invalidFractionalTurnLimit.status,400);
+    const invalidPreciseAutoDelay = await fetch(`${origin}/api/settings`, { method:"POST", headers, body:JSON.stringify({ ...current, scope:"system", autoDelaySeconds:2.55 }) });
+    assert.equal(invalidPreciseAutoDelay.status,400);
     const invalid = await fetch(`${origin}/api/settings`, { method:"POST", headers, body:JSON.stringify({ ...current, scope:"api", apiKey:"", apiUrl:"file:///tmp/model", timeoutSeconds:120, autoDelaySeconds:5, imageFormat:"webp", requestTraceLimit:100 }) });
     assert.equal(invalid.status, 400);
   } finally { await stopServer(child); }
@@ -970,6 +984,27 @@ test("Codex CLI mode writes the configured WebP image with a .webp extension", {
   }
 });
 
+test("Main Canvas AI rediscovers Codex CLI after its configured executable disappears and reuses the recovery", { timeout:20000 }, async () => {
+  const directory=await fs.promises.mkdtemp(path.join(os.tmpdir(),"penecho-codex-recovery-")),cli=await recoverableCodexCli(directory),stateDir=path.join(directory,"state"),
+    missing=path.join(directory,"removed-codex"),env=serverEnv({PENECHO_STATE_DIR:stateDir,CODEX_CLI_PATH:missing,PATH:`${cli.bin}${path.delimiter}${process.env.PATH||""}`}),
+    {child,origin}=await startServer(env);
+  try {
+    const page=await fetch(origin),cookie=page.headers.get("set-cookie")?.split(";",1)[0],headers={"Content-Type":"application/json",Origin:origin,Cookie:cookie};
+    for(let index=0;index<2;index++){
+      const response=await fetch(`${origin}/api/ai/command`,{method:"POST",headers,body:JSON.stringify(validPayload())}),body=await response.json();
+      assert.equal(response.status,200,JSON.stringify(body));
+      assert.equal(body.message,"Recovered Canvas AI");
+    }
+    const invocations=(await fs.promises.readFile(cli.record,"utf8")).trim().split(/\r?\n/);
+    assert.deepEqual(invocations,["version","login","canvas","canvas"]);
+    const logText=await fs.promises.readFile(path.join(stateDir,"logs","penecho.log"),"utf8");
+    assert.match(logText,/"type":"cli-auto-recovery"/);
+  } finally {
+    await stopServer(child);
+    await fs.promises.rm(directory,{recursive:true,force:true});
+  }
+});
+
 test("Claude CLI failures expose the useful upstream diagnostic", { timeout:20000 }, async () => {
   const directory=await fs.promises.mkdtemp(path.join(os.tmpdir(),"penecho-server-claude-error-")),fakeCli=path.join(directory,"fake-claude.js");
   await fs.promises.writeFile(fakeCli, `process.stderr.write("invalid effort value: future-model-level");process.exit(1);\n`);
@@ -1000,6 +1035,10 @@ test("page reasoning effort maps to OpenAI and Anthropic request fields", { time
     const maxRequest=JSON.parse(openai.requests[1]);
     assert.equal(maxRequest.reasoning_effort,"max");
     assert.equal(Object.hasOwn(maxRequest,"temperature"),false);
+    const customPayload=validPayload();customPayload.reasoningEffort="Provider_Native";
+    const customResponse=await fetch(`${openaiServer.origin}/api/ai/command`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(customPayload)});
+    assert.equal(customResponse.status,200);
+    assert.equal(JSON.parse(openai.requests[2]).reasoning_effort,"provider_native");
   } finally { await stopServer(openaiServer.child); await new Promise(resolve=>openai.server.close(resolve)); }
 
   const kimi=await startApiServer(),kimiServer=await startServer(apiServerEnv(kimi.origin,{AI_API_MODEL:"k3"}));
@@ -1260,6 +1299,14 @@ test("shared PenEcho server canvases support authorized metadata-first CRUD", { 
     assert.equal(legacyLoaded.canvas.view.navigationLocked,false);
     assert.equal(legacyLoaded.canvas.theme,"studio");
 
+    const renamed=await fetch(`${origin}/api/canvases/${encodeURIComponent(snapshot.id)}`,{method:"PATCH",headers:mutationHeaders,body:JSON.stringify({name:"Renamed from History"})}),
+      renamedBody=await renamed.json();
+    assert.equal(renamed.status,200,JSON.stringify(renamedBody));
+    assert.equal(renamedBody.canvas.name,"Renamed from History");
+    assert.equal((await fetch(`${origin}/api/canvases/${encodeURIComponent(snapshot.id)}`).then(response=>response.json())).canvas.name,"Renamed from History");
+    const blankRename=await fetch(`${origin}/api/canvases/${encodeURIComponent(snapshot.id)}`,{method:"PATCH",headers:mutationHeaders,body:JSON.stringify({name:"   "})});
+    assert.equal(blankRename.status,400);
+
     const invalidId=await fetch(`${origin}/api/canvases/../../package.json`);
     assert.equal(invalidId.status,404);
     const invalidSnapshot=await fetch(`${origin}/api/canvases`,{method:"POST",headers:mutationHeaders,body:JSON.stringify({...validSharedCanvas(),preview:"data:text/plain;base64,SGk="})});
@@ -1349,6 +1396,7 @@ test("shared PenEcho server canvases retain up to one hundred widgets, images, a
       naturalW:1,
       naturalH:1,
       sourceName:"",
+      ...(index===0?{plotExpression:"x^2+1"}:{}),
       data:PNG,
     }));
   try {
@@ -1376,6 +1424,8 @@ test("shared PenEcho server canvases retain up to one hundred widgets, images, a
       imagesAcceptedBody=await imagesAccepted.json();
     assert.equal(imagesAccepted.status,201,JSON.stringify(imagesAcceptedBody));
     assert.equal(imagesAcceptedBody.canvas.imageCount,100);
+    const imagesStored=await fetch(`${origin}/api/canvases/${encodeURIComponent(imagesAcceptedBody.canvas.id)}`).then(response=>response.json());
+    assert.equal(imagesStored.canvas.images.find(image=>image.id==="image-1").plotExpression,"x^2+1");
 
     const imagesRejected=await fetch(`${origin}/api/canvases`,{
       method:"POST",
@@ -2158,6 +2208,15 @@ test("widget host CSP permits on-demand HTTPS resources inside the isolated widg
     const configScript = await fetch(`${origin}/api/config.js`).then(response => response.text()),
       accessSession = /"accessSessionToken":"([A-Za-z0-9_-]+)"/.exec(configScript)?.[1];
     assert.match(accessSession, /^[A-Za-z0-9_-]{40,}$/);
+    const staleSessionHost = await fetch(`${origin}/widget-host.html?access-session=${accessSession}stale`);
+    assert.equal(staleSessionHost.status, 200, "an open Canvas survives a server restart with its previous process token");
+    assert.match(await staleSessionHost.text(), /widget-host\.js/);
+    const duplicateSession = new URLSearchParams();
+    duplicateSession.append("access-session", accessSession);
+    duplicateSession.append("access-session", accessSession);
+    const duplicateSessionHost = await fetch(`${origin}/widget-host.html?${duplicateSession}`);
+    assert.equal(duplicateSessionHost.status, 400);
+    assert.match(await duplicateSessionHost.text(), /Invalid widget host session/);
     const sandboxedWidgetData = await fetch(`${origin}/api/widget-fetch`, {
       method:"POST",
       headers:{ "Content-Type":"application/json", "X-PenEcho-Session":accessSession },
@@ -2215,13 +2274,13 @@ test("local plugin discovery is constrained and widget prompting is conditional"
   assert.match(source, /current or changing public information such as news[\s\S]*?network-backed html_widget[\s\S]*?refreshSeconds interval[\s\S]*?update frequency and rate limits/);
   assert.match(source, /if \(pluginsEnabled\) sections\.push\(PLUGIN_ROUTING_PROMPT, PLUGIN_SYSTEM_PROMPT\)/);
   assert.match(source, /pluginsEnabled = Array\.isArray\(modelInput\?\.enabledPlugins\) && modelInput\.enabledPlugins\.length > 0/);
-  assert.match(source, /function localPluginCatalog\(\)[\s\S]*?entry\.isFile\(\)[\s\S]*?entry\.isDirectory\(\)[\s\S]*?MAX_LOCAL_PLUGINS/);
+  assert.match(source, /function localPluginCatalog\(scope = "all"\)[\s\S]*?entry\.isFile\(\)[\s\S]*?entry\.isDirectory\(\)[\s\S]*?MAX_LOCAL_PLUGINS/);
   assert.match(source, /process\.env\.PENECHO_PRIVATE_PLUGIN_DIR[\s\S]*?path\.resolve\(process\.env\.PENECHO_PRIVATE_PLUGIN_DIR\)/);
   assert.match(source, /STATE_DIRECTORY[\s\S]*?path\.join\(STATE_DIRECTORY, "plugins", "private"\)/);
-  assert.match(source, /function localPluginCatalog\(\)[\s\S]*?PRIVATE_PLUGIN_DIRECTORY[\s\S]*?plugins\/private/);
+  assert.match(source, /function localPluginCatalog\(scope = "all"\)[\s\S]*?PRIVATE_PLUGIN_DIRECTORY[\s\S]*?plugins\/private[\s\S]*?scope !== "private" \|\| !builtIn/);
   assert.match(source, /function saveLocalPluginDocument\([\s\S]*?BUILTIN_PLUGIN_IDS\.has\(manifest\.id\)[\s\S]*?mkdirSync\(PRIVATE_PLUGIN_DIRECTORY/);
   assert.match(source, /function deleteLocalPlugin\([\s\S]*?path\.join\(PRIVATE_PLUGIN_DIRECTORY/);
-  assert.match(source, /url\.pathname === "\/api\/plugins"[\s\S]*?localPluginCatalog\(\)/);
+  assert.match(source, /url\.pathname === "\/api\/plugins"[\s\S]*?url\.searchParams\.get\("scope"\) === "private"[\s\S]*?localPluginCatalog\(scope\)/);
   assert.match(source, /url\.pathname === "\/api\/plugins"[\s\S]*?saveLocalPluginDocument\(body\.document, body\.styles \|\| ""\)/);
   assert.match(source, /const PLUGIN_AUTHORING_SYSTEM = `[\s\S]*?under 12000 UTF-8 bytes[\s\S]*?under 32000 UTF-8 bytes/);
   assert.match(source, /url\.pathname === "\/api\/plugins\/improve"[\s\S]*?improvePluginDocument/);
@@ -2255,6 +2314,10 @@ test("personal plugins use the writable desktop directory and remain fetchable",
       entry=catalog.plugins.find(plugin=>plugin.path==="plugins/private/desktop-private-test/plugin.md");
     assert.equal(entry?.builtIn,false);
     assert.equal(entry?.stylePath,"plugins/private/desktop-private-test/styles.css");
+    const privateCatalog=await fetch(`${running.origin}/api/plugins?scope=private`).then(value=>value.json());
+    assert.ok(privateCatalog.plugins.length >= 1);
+    assert.ok(privateCatalog.plugins.every(plugin=>plugin.builtIn===false));
+    assert.ok(privateCatalog.plugins.some(plugin=>plugin.path==="plugins/private/desktop-private-test/plugin.md"));
     const served=await fetch(`${running.origin}/${entry.path}`);
     assert.equal(served.status,200);
     assert.equal((await served.text()).trim(),document.trim());
@@ -2291,6 +2354,24 @@ test("community metadata accepts an optional continuation prompt and validates t
   } finally {
     await stopServer(running.child);
     await new Promise(resolve=>upstream.server.close(resolve));
+  }
+});
+
+test("Widget publish metadata uses the same Codex CLI auto-recovery as Main Canvas AI", { timeout:20000 }, async () => {
+  const directory=await fs.promises.mkdtemp(path.join(os.tmpdir(),"penecho-community-codex-recovery-")),cli=await recoverableCodexCli(directory),stateDir=path.join(directory,"state"),
+    image=await sharp({create:{width:96,height:64,channels:4,background:{r:35,g:92,b:155,alpha:1}}}).webp({quality:80}).toBuffer(),
+    payload={kind:"widget",language:"en",preview:{contentType:"image/webp",width:96,height:64,dataBase64:image.toString("base64")},current:{name:"",description:"",category:"productivity",tags:[]},context:{title:"Recovered Widget"}},
+    env=serverEnv({PENECHO_STATE_DIR:stateDir,CODEX_CLI_PATH:path.join(directory,"removed-codex"),PATH:`${cli.bin}${path.delimiter}${process.env.PATH||""}`}),
+    running=await startServer(env);
+  try {
+    const response=await fetch(`${running.origin}/api/community/metadata`,{method:"POST",headers:{Origin:running.origin,"Content-Type":"application/json","X-PenEcho-Connection":"default"},body:JSON.stringify(payload)}),body=await response.json();
+    assert.equal(response.status,200,JSON.stringify(body));
+    assert.deepEqual(body.metadata,cli.communityMetadata);
+    const invocations=(await fs.promises.readFile(cli.record,"utf8")).trim().split(/\r?\n/);
+    assert.deepEqual(invocations,["version","login","community"]);
+  } finally {
+    await stopServer(running.child);
+    await fs.promises.rm(directory,{recursive:true,force:true});
   }
 });
 
@@ -2986,7 +3067,7 @@ test("debug persistence redacts recognized and generated text", { timeout: 20000
     const malformedResponse = await fetch(`${origin}/api/ai/command`, { method: "POST", headers: { "Content-Type": "application/json", Origin: origin, Cookie: cookie }, body: JSON.stringify(malformed) });
     assert.equal(malformedResponse.status, 400);
     const invalidEffort = validPayload();
-    invalidEffort.reasoningEffort = marker;
+    invalidEffort.reasoningEffort = `${marker}\ninvalid`;
     const invalidEffortResponse = await fetch(`${origin}/api/ai/command`, { method: "POST", headers: { "Content-Type": "application/json", Origin: origin, Cookie: cookie }, body: JSON.stringify(invalidEffort) });
     assert.equal(invalidEffortResponse.status, 400);
     const extra = validPayload(), nested = { value: marker };
@@ -3023,10 +3104,12 @@ test("debug persistence redacts recognized and generated text", { timeout: 20000
 });
 
 test("static page keeps strict styles while allowing the pinned MathJax CDN", () => {
-  const html = fs.readFileSync(path.join(ROOT, "public", "index.html"), "utf8"), css = fs.readFileSync(path.join(ROOT, "public", "style.css"), "utf8"), app = fs.readFileSync(path.join(ROOT, "public", "app.js"), "utf8"), config=fs.readFileSync(path.join(ROOT,"public","mathjax-config.js"),"utf8"), server=fs.readFileSync(path.join(ROOT,"src","server","main.js"),"utf8");
+  const html = fs.readFileSync(path.join(ROOT, "public", "index.html"), "utf8"), css = fs.readFileSync(path.join(ROOT, "public", "style.css"), "utf8"), app = fs.readFileSync(path.join(ROOT, "public", "app.js"), "utf8"), pageScale=fs.readFileSync(path.join(ROOT,"public","page-scale.js"),"utf8"), config=fs.readFileSync(path.join(ROOT,"public","mathjax-config.js"),"utf8"), server=fs.readFileSync(path.join(ROOT,"src","server","main.js"),"utf8"), elementStyleWrites=[...app.matchAll(/([A-Za-z_$][\w$?.]*)\.style\.(?:setProperty|removeProperty|[A-Za-z_$][\w$]*\s*=)/g)].filter(([,owner])=>!owner.endsWith(".styleRule")).map(([write])=>write);
   assert.doesNotMatch(html, /\sstyle=/i);
   assert.match(css, /\.color-blue\s*\{/);
-  assert.doesNotMatch(app, /\.style\.|setAttribute\(\s*["']style["']/);
+  assert.deepEqual(elementStyleWrites,[]);
+  assert.doesNotMatch(app, /setAttribute\(\s*["']style["']/);
+  assert.doesNotMatch(pageScale,/\.style\.|setAttribute\(\s*["']style["']/);
   assert.match(html, /https:\/\/cdn\.jsdelivr\.net\/npm\/mathjax@3\.2\.2\/es5\/tex-svg\.js/);
   assert.match(html, /integrity="sha384-KKWa9jJ1MZvssLeOoXG6FiOAZfAgmzsIIfw8BXwI9\+kYm0lPCbC6yTQPBC00F1\/L"/);
   assert.match(html, /crossorigin="anonymous"/);

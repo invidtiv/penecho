@@ -86,9 +86,6 @@
   function stopActiveAIRequests() {
     const active = state.activeAI || aiPreparation;
     if (!active || active.superseded) return false;
-    state.radialGesture = null;
-    state.radialSuppressClickUntil = performance.now() + 450;
-    closeRadialMenu();
     supersedeActiveAI("user-stop");
     return true;
   }
@@ -384,6 +381,10 @@
         debug("ai-deferred", { ...meta, reason: "user-revision-changed" });
         return;
       }
+      if (state.images.length + commands.filter((command) => command.tool === "plot_function").length > MAX_VISIBLE_IMAGES) {
+        setStatusKey("imageLimitReached");
+        throw Error(t("imageLimitReached"));
+      }
       if (commands.length) {
         if (!isolatedSelection) {
           state.dirty = null;
@@ -496,11 +497,11 @@
     }
   }
   function viewportRect() {
-    const r = view.getBoundingClientRect(),
+    const { width, height } = canvasViewportMetrics(),
       x = Math.max(0, -state.panX / state.scale),
       y = Math.max(0, -state.panY / state.scale),
-      right = Math.min(SIZE, (r.width - state.panX) / state.scale),
-      bottom = Math.min(SIZE, (r.height - state.panY) / state.scale);
+      right = Math.min(SIZE, (width - state.panX) / state.scale),
+      bottom = Math.min(SIZE, (height - state.panY) / state.scale);
     return right > x && bottom > y ? { x, y, w: right - x, h: bottom - y } : null;
   }
   function visibleInkBounds(visible) {
@@ -1026,6 +1027,7 @@
         if (!accepted) throw Error(AI_REJECTED);
       } else {
         let image,
+          plotBlob = null,
           x = c.x,
           y = c.y,
           pendingCommand = c;
@@ -1034,7 +1036,9 @@
         } else if (c.tool === "draw_formula") {
           image = await formulaImage(c.latex, c.fontSize, c.color);
         } else if (c.tool === "plot_function") {
-          image = plot(c);
+          const preparedPlot = await plotObjectImage(c);
+          image = preparedPlot.image;
+          plotBlob = preparedPlot.blob;
         } else if (c.tool === "animate_scene") {
           pendingCommand = ANIMATION.normalize(c, SIZE);
           image = pendingCommand ? ANIMATION.rasterize(pendingCommand, offscreen, 0, Math.min(2, sharpRenderRatio())) : null;
@@ -1048,7 +1052,7 @@
           checkAI(revision, run);
           x = Math.max(0, Math.min(x, SIZE - Math.min(image.logicalWidth || image.width, SIZE)));
           y = Math.max(0, Math.min(y, SIZE - Math.min(image.logicalHeight || image.height, SIZE)));
-          const accepted = await startPending(image, x, y, revision, meta, pendingCommand);
+          const accepted = await startPending(image, x, y, revision, meta, pendingCommand, plotBlob);
           if (accepted === AI_CANCELLED) throw Error(AI_CANCELLED);
           if (accepted === AI_SUPERSEDED) throw Error(AI_SUPERSEDED);
           if (accepted === AI_REJECTED || !accepted) throw Error(AI_REJECTED);
@@ -1069,12 +1073,17 @@
       return { command: c, erase: true, bounds, image: eraseMask(c, bounds) };
     }
     let image,
+      plotBlob = null,
       x = c.x,
       y = c.y,
       pendingCommand = c;
     if (c.tool === "write_text") image = textImage(c.text, c.fontSize, c.color, c.maxWidth, c.lineHeight, state.aiFont, AI_TEXT_MAX_LENGTH, sharpRenderRatio());
     else if (c.tool === "draw_formula") image = await formulaImage(c.latex, c.fontSize, c.color);
-    else if (c.tool === "plot_function") image = plot(c);
+    else if (c.tool === "plot_function") {
+      const preparedPlot = await plotObjectImage(c);
+      image = preparedPlot.image;
+      plotBlob = preparedPlot.blob;
+    }
     else if (c.tool === "animate_scene") {
       pendingCommand = ANIMATION.normalize(c, SIZE);
       image = pendingCommand ? ANIMATION.rasterize(pendingCommand, offscreen, 0, Math.min(2, sharpRenderRatio())) : null;
@@ -1093,6 +1102,7 @@
       image,
       textCommand: c.tool === "write_text" ? { ...c } : null,
       copyText: copyTextForCommand(c),
+      plotBlob,
       animationScene: c.tool === "animate_scene" ? pendingCommand : null,
       animationPlayback: c.tool === "animate_scene" ? createAnimationPlayback() : null,
       x: Math.max(0, Math.min(x, SIZE - Math.min(logicalWidth, SIZE))),
@@ -1138,7 +1148,7 @@
 
   function textRasterMetrics(text, f, maxWidth = 900, lineHeight = 1.35, family = state.aiFont, maxLength = AI_TEXT_MAX_LENGTH, pixelRatio = 1) {
     const content = text.slice(0, maxLength),
-      fontFamily = family || "ui-rounded, system-ui, sans-serif";
+      fontFamily = family || AI_FONT_HANDWRITTEN;
     maxWidth = Math.max(f, Math.min(SIZE, maxWidth));
     const probe = offscreen(1, 1).getContext("2d");
     probe.font = `${f}px ${fontFamily}`;
@@ -1167,6 +1177,8 @@
     image.naturalWidth = naturalWidth;
     image.logicalWidth = naturalWidth;
     image.logicalHeight = naturalHeight;
+    image.contentInsetX = 2;
+    image.contentInsetY = 2 - (rowHeight - f) / 2;
     return image;
   }
   function layoutText(content, context, maxWidth) {
@@ -1225,7 +1237,7 @@
   async function mixedTextImage(text, fontSize, color, maxWidth = 900, lineHeight = 1.35, family = state.aiFont, pixelRatio = sharpRenderRatio()) {
     if (!MIXED_TEXT?.parse) return textImage(text, fontSize, color, maxWidth, lineHeight, family, TEXT_INPUT_MAX_LENGTH, pixelRatio);
     const parsed = MIXED_TEXT.parse(text.slice(0, TEXT_INPUT_MAX_LENGTH)),
-      resolvedFamily = family || "ui-rounded, system-ui, sans-serif",
+      resolvedFamily = family || AI_FONT_HANDWRITTEN,
       widthLimit = Math.max(fontSize * 3, Math.min(SIZE, maxWidth)),
       probe = offscreen(1, 1).getContext("2d"),
       formulaCache = new Map(),
@@ -1305,6 +1317,8 @@
     }
     image.logicalWidth = naturalWidth;
     image.logicalHeight = naturalHeight;
+    image.contentInsetX = padding;
+    image.contentInsetY = padding;
     image.revealRows = rows.map((row) => Math.max(1, row.width));
     image.revealRowHeight = naturalHeight / Math.max(1, rows.length);
     return image;
@@ -1432,6 +1446,7 @@
   function copyTextForCommand(command) {
     if (command?.tool === "write_text" && typeof command.text === "string") return command.text;
     if (command?.tool === "draw_formula" && typeof command.latex === "string") return command.latex;
+    if (command?.tool === "plot_function" && typeof command.expression === "string") return command.expression;
     return null;
   }
   function pendingCopyValue(target) {
@@ -1545,7 +1560,6 @@
     ctx.lineTo(b.x + b.w / 2 + s * 0.48, b.y + b.h + s * 0.08);
     ctx.stroke();
     ctx.restore();
-    drawCopyFeedback(ctx, b, s, p);
   }
   function drawPendingBatch(p, context = ctx, options = null) {
     const ctx = context,
@@ -1590,7 +1604,6 @@
       ctx.setLineDash(index === p.selectedIndex ? [] : [6 * unit, 6 * unit]);
       ctx.strokeRect(box.x, box.y, box.w, box.h);
       ctx.restore();
-      drawCopyFeedback(ctx, box, s, item);
     }
     ctx.save();
     ctx.strokeStyle = "#2679b8";
@@ -1681,28 +1694,6 @@
       }
       context.stroke();
     }
-    context.restore();
-  }
-  function drawCopyFeedback(context, box, s, target) {
-    if (target?.copyFeedbackGeneration !== state.copyGeneration || !Number.isFinite(target.copyFeedbackUntil) || target.copyFeedbackUntil <= performance.now()) return;
-    const unit = 1 / state.scale,
-      label = t("textCopied"),
-      fontSize = 11 * unit,
-      paddingX = 6 * unit,
-      paddingY = 4 * unit;
-    context.save();
-    context.font = `700 ${fontSize}px system-ui, sans-serif`;
-    const width = context.measureText(label).width + paddingX * 2,
-      height = fontSize + paddingY * 2,
-      x = Math.max(0, Math.min(SIZE - width, box.x + box.w / 2 - width / 2)),
-      above = box.y - s * 1.15 - height,
-      y = above >= 0 ? above : Math.min(SIZE - height, box.y + s * 0.95);
-    context.fillStyle = "#111827e8";
-    context.fillRect(x, y, width, height);
-    context.fillStyle = "#fff";
-    context.textAlign = "center";
-    context.textBaseline = "middle";
-    context.fillText(label, x + width / 2, y + height / 2);
     context.restore();
   }
   function drawResizeHandle(context, b, s) {
@@ -1868,7 +1859,6 @@
     const generation = ++state.copyGeneration,
       stillPending = () => state.copyGeneration === generation && state.pending === pending && (pending?.items ? pending.items.includes(target) : target === pending);
     setStatusKey("copyText");
-    requestRender();
     const copied = await writeClipboardText(text);
     if (!stillPending()) return copied;
     if (!copied) {
@@ -1876,17 +1866,10 @@
       return false;
     }
     setStatusKey("textCopied");
-    target.copyFeedbackGeneration = generation;
-    target.copyFeedbackUntil = performance.now() + COPY_FEEDBACK_MS;
-    requestRender();
     setTimeout(() => {
-      if (!stillPending() || target.copyFeedbackGeneration !== generation) return;
-      if (target.copyFeedbackUntil <= performance.now()) {
-        target.copyFeedbackUntil = 0;
-        requestRender();
-      }
+      if (!stillPending()) return;
       if (state.statusKey === "textCopied") setStatusKey(state.pending?.items ? "batchDraftReady" : state.pending ? "draftReady" : "ready");
-    }, COPY_FEEDBACK_MS + 30);
+    }, COPY_STATUS_MS + 30);
     return true;
   }
   function acceptPending(options) {
@@ -1910,6 +1893,7 @@
       const box = draftBounds(p);
       addAnimation(p.animationScene, box, p.animationPlayback);
     }
+    else if (p.command?.tool === "plot_function") addPendingPlotImage(p, draftBounds(p));
     else if (p.textCommand) {
       const box = draftBounds(p);
       blitClipped(p.image, p.x, p.y, (p.image.logicalWidth || p.image.width) * p.scaleX, (p.image.logicalHeight || p.image.height) * p.scaleY, box.w, box.h);
@@ -2057,6 +2041,7 @@
       animationScene: p.animationScene || null,
       animationPlayback: p.animationPlayback || null,
       copyText: pendingCopyValue(p),
+      plotBlob:p.plotBlob || null,
       x: p.x,
       y: p.y,
       scaleX: p.scaleX || 1,
@@ -2093,7 +2078,7 @@
     if (pendingAnimationControlTarget()) showAnimationControls();
     releaseSelectionAITransformLock();
   }
-  function startPending(image, x, y, revision, meta, command) {
+  function startPending(image, x, y, revision, meta, command, plotBlob = null) {
     return new Promise((resolve) => {
       enterAIDraftHandMode();
       const textCommand = command.tool === "write_text" ? { ...command } : null,
@@ -2102,7 +2087,7 @@
         layoutWidth = textCommand ? command.maxWidth : image.logicalWidth || image.width,
         layoutHeight = image.logicalHeight || image.height;
       if (state.pending) {
-        appendPendingItems(state.pending, [{ command: { ...command }, image, textCommand, animationScene, copyText, x, y, layoutWidth, layoutHeight }], revision, meta, resolve);
+        appendPendingItems(state.pending, [{ command: { ...command }, image, textCommand, animationScene, copyText, plotBlob, x, y, layoutWidth, layoutHeight }], revision, meta, resolve);
         return;
       }
       const rows = image.revealRows || [image.logicalWidth || image.width],
@@ -2117,6 +2102,7 @@
         scaleY: 1,
         textCommand,
         copyText,
+        plotBlob,
         animationScene,
         animationPlayback: animationScene ? createAnimationPlayback() : null,
         layoutWidth,
@@ -2180,11 +2166,32 @@
   function commitPendingBatch(p) {
     for (const item of p.items) commitPendingItem(item);
   }
+  function addPendingPlotImage(item, box = pendingItemBounds(item)) {
+    const expression = typeof item?.command?.expression === "string" ? item.command.expression.trim() : "";
+    if (!expression || !(item.plotBlob instanceof Blob) || state.images.length >= MAX_VISIBLE_IMAGES) throw Error("Plot object could not be committed");
+    recordImagesBefore();
+    const record = imageRecord({
+      image:item.image,
+      blob:item.plotBlob,
+      x:box.x,
+      y:box.y,
+      w:box.w,
+      h:box.h,
+      naturalW:item.image.width,
+      naturalH:item.image.height,
+      sourceName:"",
+      plotExpression:expression,
+    });
+    if (!record) throw Error("Plot object could not be committed");
+    state.images.push(record);
+    return record;
+  }
   function commitPendingItem(item) {
     const box = pendingItemBounds(item);
     if (item.erase) eraseWithMask(item.image, box.x, box.y, box.w, box.h);
     else if (item.textCommand) blitClipped(item.image, item.x, item.y, (item.image.logicalWidth || item.image.width) * item.scaleX, (item.image.logicalHeight || item.image.height) * item.scaleY, box.w, box.h);
     else if (item.animationScene) addAnimation(item.animationScene, box, item.animationPlayback);
+    else if (item.command?.tool === "plot_function") addPendingPlotImage(item, box);
     else blitSized(item.image, box.x, box.y, (item.image.logicalWidth || item.image.width) * item.scaleX, (item.image.logicalHeight || item.image.height) * item.scaleY);
   }
   function armPendingCopy(e, hit, itemIndex = null) {
@@ -2545,6 +2552,21 @@
       .replace(/√\s*([A-Za-z0-9_.]+)/g, "sqrt($1)")
       .replace(/(\d|\)|x(?![A-Za-z_])|pi(?![A-Za-z_])|e(?![A-Za-z_]))\s*(?=x|pi|e(?![+\-]?\d)|sin|cos|tan|sqrt|abs|exp|log|ln|\()/gi, "$1*");
   }
+  async function plotObjectImage(command) {
+    const rendered = plot(command),
+      logicalWidth = rendered.logicalWidth || rendered.width,
+      logicalHeight = rendered.logicalHeight || rendered.height,
+      scale = Math.min(1, MAX_IMAGE_DIMENSION / logicalWidth, MAX_IMAGE_DIMENSION / logicalHeight, Math.sqrt(MAX_IMAGE_PIXELS / (logicalWidth * logicalHeight)));
+    let image = rendered;
+    if (scale < 1) {
+      image = offscreen(Math.max(1, Math.round(logicalWidth * scale)), Math.max(1, Math.round(logicalHeight * scale)));
+      image.getContext("2d").drawImage(rendered, 0, 0, image.width, image.height);
+      rendered.width = rendered.height = 1;
+    }
+    image.logicalWidth = logicalWidth;
+    image.logicalHeight = logicalHeight;
+    return { image, blob:await canvasBlob(image), logicalWidth, logicalHeight };
+  }
   function plot(c) {
     const o = offscreen(c.w, c.h),
       q = o.getContext("2d"),
@@ -2855,7 +2877,13 @@
   function finishDrawing(pointerType) {
     if (!state.drawing) return;
     const d = state.drawing;
+    commitLiveInkDrawing(d);
     state.drawing = null;
+    noteCanvasChromeInteraction();
+    requestAnimationFrame(() => {
+      if (!state.drawing) view.classList.remove("is-drawing");
+    });
+    scheduleLiveInkLayerWarmup();
     const shouldRequest = !d.erase;
     let refineCandidate = null;
     if (shouldRequest) {
@@ -2869,8 +2897,8 @@
     }
     notePendingContinuedInput(d);
     state.autoEligible ||= shouldRequest;
+    saveUserCanvasChange();
     if (state.dirty && state.autoEligible && !refineCandidate) schedule();
-    save();
     requestInteractionLayerRender();
     if (shouldRequest || d.erase) setStatusKey(refineCandidate ? "widgetRefinePending" : state.pending?.items ? "batchDraftReady" : state.pending ? "draftReady" : "ready");
   }

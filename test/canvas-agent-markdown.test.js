@@ -10,6 +10,7 @@ const MIXED_TEXT = require("../public/mixed-text.js");
 
 const ROOT=path.resolve(__dirname,"..");
 const source=fs.readFileSync(path.join(ROOT,"src/client/app/canvas-agent-runtime.js"),"utf8");
+const css=fs.readFileSync(path.join(ROOT,"public/style.css"),"utf8");
 function functionSource(name){
   let start=source.indexOf(`function ${name}(`);
   assert.notEqual(start,-1,`missing function ${name}`);
@@ -35,15 +36,38 @@ function renderer(document,MathJax){
 
 function messageAppender(document,clipboardWrites){
   const names=["canvasAgentFencedSegments","canvasAgentBlockLabel","canvasAgentMarkdownHref","canvasAgentDisplayMathSegments","canvasAgentSafeMathJaxNode","canvasAgentMarkdownMathNode","canvasAgentAppendMarkdownStyled","canvasAgentAppendMarkdownLinks","canvasAgentAppendMarkdownInline","canvasAgentMarkdownSafe","canvasAgentAppendMarkdown","canvasAgentRenderMessageBody","canvasAgentSetAssistantCopyState","canvasAgentCopyAssistantMessage","canvasAgentSetAssistantCopyReady","canvasAgentAssistantPosition","canvasAgentAppendMessageElement"];
-  const translations={canvasAgentCodeBlock:"Code",canvasAgentTextBlock:"Text",canvasAgentCopyBlock:"Copy",canvasAgentBlockCopied:"Copied",canvasAgentBlockCopyFailed:"Copy failed",canvasAgentCopyResponse:"Copy response",canvasAgentResponseCopied:"Copied",canvasAgentResponseCopyFailed:"Copy failed",canvasAgentHistoryAttachments:"{count} attachments"};
+  const translations={canvasAgentCodeBlock:"Code",canvasAgentTextBlock:"Text",canvasAgentCopyBlock:"Copy",canvasAgentBlockCopied:"Copied",canvasAgentBlockCopyFailed:"Copy failed",canvasAgentCopyResponse:"Copy response",canvasAgentResponseCopied:"Copied",canvasAgentResponseCopyFailed:"Copy failed",canvasAgentLikeResponse:"Helpful",canvasAgentCriticizeResponse:"Needs improvement",canvasAgentHistoryAttachments:"{count} attachments"};
   const canvasAgentTranscript=document.querySelector("#transcript");
   return vm.runInNewContext(`(()=>{${names.map(functionSource).join("\n")}return {append:canvasAgentAppendMessageElement,copy:canvasAgentCopyAssistantMessage};})()`,{
     document,URL,MIXED_TEXT,canvasAgentTranscript,CANVAS_AGENT_MARKDOWN_TEXT_LIMIT:12000,CANVAS_AGENT_MARKDOWN_LINE_LIMIT:240,CANVAS_AGENT_MARKDOWN_MARKER_LIMIT:800,CANVAS_AGENT_MARKDOWN_BACKSLASH_LIMIT:256,CANVAS_AGENT_MARKDOWN_SEGMENT_LIMIT:48,CANVAS_AGENT_MARKDOWN_MATH_COUNT_LIMIT:64,CANVAS_AGENT_MARKDOWN_MATH_SOURCE_LIMIT:4000,
     t:key=>translations[key]||key,
     writeClipboardText:async value=>{clipboardWrites.push(String(value));return true;},
+    canvasAgentActionIcon:()=>document.createElementNS("http://www.w3.org/2000/svg","svg"),
+    canvasAgentSyncAssistantActionState:target=>{
+      const ready=target.historyItem.copyable===true;
+      target.copyActions.hidden=!ready;
+      target.copyButton.disabled=!ready;
+      for(const feedbackButton of target.feedbackButtons)feedbackButton.hidden=true;
+      target.retryButton.hidden=true;
+    },
+    canvasAgentEvaluateAssistantMessage:()=>false,canvasAgentRetryAssistantMessage:async()=>false,
     setTimeout:()=>0,clearTimeout:()=>{},
   });
 }
+
+test("PenEcho Agent final replies use the quiet workbench typography hierarchy",()=>{
+  assert.match(css,/\.canvas-agent-message\.assistant:not\(\.error\):not\(\.canvas-agent-public-progress\)\s*\{[\s\S]*?width:\s*min\(100%, 68ch\);[\s\S]*?max-width:\s*100%;/);
+  assert.match(css,/\.canvas-agent-message\.assistant:not\(\.error\):not\(\.canvas-agent-public-progress\) \.canvas-agent-message-role\s*\{[^}]*display:\s*none;/);
+  assert.match(css,/\.canvas-agent-message\.assistant:not\(\.error\):not\(\.canvas-agent-public-progress\) \.canvas-agent-message-body\s*\{[^}]*padding:\s*0;[^}]*border:\s*0;[^}]*border-radius:\s*0;[^}]*background:\s*transparent;/);
+  assert.match(css,/body\[data-theme="studio"\] \.canvas-agent-message\.assistant:not\(\.error\):not\(\.canvas-agent-public-progress\) \.canvas-agent-message-body\s*\{[^}]*border:\s*0;[^}]*background:\s*transparent;/);
+  assert.match(css,/\.canvas-agent-message-body\.is-markdown strong\s*\{[^}]*font-weight:\s*500;/);
+  assert.match(css,/\.canvas-agent-message-body\.is-markdown \.canvas-agent-markdown-heading\s*\{[^}]*font-size:\s*\.875rem;[^}]*font-weight:\s*600;/);
+  assert.match(css,/\.canvas-agent-message-body\.is-markdown blockquote\s*\{[^}]*border-inline-start:\s*1px solid #cbd5e1;[^}]*background:\s*transparent;/);
+  assert.match(css,/\.canvas-agent-message-actions\s*\{[^}]*min-height:\s*28px;[^}]*justify-content:\s*flex-start;/);
+  assert.match(css,/\.canvas-agent-message\.assistant:not\(\.error\):not\(\.interrupted\):not\(\.canvas-agent-public-progress\)[\s\S]*?\.canvas-agent-markdown-heading,[\s\S]*?p > strong:first-child,[\s\S]*?li > strong:first-child[\s\S]*?color:\s*var\(--pe-accent-label\);/);
+  assert.match(css,/\.canvas-agent-message\.interrupted \.canvas-agent-message-body\s*\{[^}]*opacity:\s*1;/);
+  assert.doesNotMatch(css,/\.canvas-agent-message\.interrupted \.canvas-agent-message-body\s*\{[^}]*opacity:\s*\.68;/);
+});
 
 test("PenEcho Agent final messages render safe compact Markdown while user and streaming text stay literal",()=>{
   const {document}=parseHTML("<!doctype html><html><body><div id=body></div></body></html>"),body=document.querySelector("#body"),render=renderer(document);
@@ -163,8 +187,8 @@ test("PenEcho Agent live and persisted messages share one explicit display limit
   assert.equal(bounded.length,20000);
   assert.equal(bounded.endsWith("…"),true);
   assert.equal(emojiBoundary,`${"x".repeat(19998)}…`,"the display limit never leaves an unmatched emoji surrogate");
-  assert.match(source,/text:canvasAgentMessageText\(item\.text\)[\s\S]*?final:item\.final!==false/);
-  assert.match(source,/target\.messageText = canvasAgentMessageText\(target\.messageText \+ \(event\.text \|\| ""\)\)/);
+  assert.match(source,/text:item\.role==="assistant"\?canvasAgentVisibleAssistantText\(item\.text\):canvasAgentMessageText\(item\.text\)[\s\S]*?final:item\.final!==false/);
+  assert.match(source,/target\.messageText = canvasAgentVisibleAssistantText\(target\.messageText \+ \(event\.text \|\| ""\)\)/);
 });
 
 function assistantEventHarness(initialTargets=[]) {
@@ -180,16 +204,18 @@ function assistantEventHarness(initialTargets=[]) {
     canvasAgent.currentConversation.items.push(item);created.push(target);return target;
   },names=["canvasAgentAssistantPosition","canvasAgentPendingAssistantRow","canvasAgentCreateAssistantRow","canvasAgentHandleEvent"],
     handleEvent=vm.runInNewContext(`(()=>{${names.map(functionSource).join("\n")}return canvasAgentHandleEvent;})()`,{
-      canvasAgent,canvasAgentRow,canvasClientId:()=>`event-${++id}`,canvasAgentMessageText:value=>String(value||""),
-      canvasAgentRenderMessageBody:(body,text,role,options)=>rendered.push({body,text,role,options}),canvasAgentScheduleHistoryPersist:()=>{},canvasAgentScrollToLatest:()=>{},
+      canvasAgent,canvasAgentRow,canvasClientId:()=>`event-${++id}`,canvasAgentMessageText:value=>String(value||""),canvasAgentVisibleAssistantText:value=>String(value||""),
+      canvasAgentScheduleAssistantRender:target=>rendered.push({body:target.body,text:target.messageText,role:"assistant",options:{final:false}}),
+      canvasAgentRenderFinalAssistantMessage:target=>rendered.push({body:target.body,text:target.messageText,role:"assistant",options:{final:true}}),
+      canvasAgentFlushAssistantRenders:()=>{},canvasAgentScheduleHistoryPersist:()=>{},canvasAgentScrollToLatest:()=>{},
     });
   return {canvasAgent,created,rendered,handleEvent};
 }
 
 test("PenEcho Agent final assistant_message is authoritative over its streamed deltas",()=>{
   const handle=functionSource("canvasAgentHandleEvent");
-  assert.match(handle,/assistant_delta[\s\S]*?\{final:false\}/);
-  assert.match(handle,/assistant_message[\s\S]*?if\(typeof event\.text==="string"\)target\.messageText=canvasAgentMessageText\(event\.text\)[\s\S]*?\{final:true\}[\s\S]*?historyItem\.text=target\.messageText/);
+  assert.match(handle,/assistant_delta[\s\S]*?canvasAgentScheduleAssistantRender\(target\)/);
+  assert.match(handle,/assistant_message[\s\S]*?if\(typeof event\.text==="string"\)target\.messageText=canvasAgentVisibleAssistantText\(event\.text\)[\s\S]*?canvasAgentRenderFinalAssistantMessage\(target\)[\s\S]*?historyItem\.text=target\.messageText/);
   assert.match(handle,/historyItem\.final=false[\s\S]*?historyItem\.final=true/);
   assert.doesNotMatch(handle,/event\.text && !target\.messageText/);
   assert.match(source,/canvasAgentAppendMessageElement\(item[\s\S]*?final:item\.role!=="assistant"\|\|item\.final!==false/);
@@ -238,7 +264,7 @@ test("PenEcho Agent enables response copy only for the last completed assistant 
   const intermediateItem={type:"message",role:"assistant",turn:4,step:1,final:true,copyable:false},toolItem={type:"tool",turn:4,step:2},summaryItem={type:"message",role:"assistant",turn:4,step:3,final:true,copyable:false},otherTurnItem={type:"message",role:"assistant",turn:3,step:8,final:true,copyable:false},
     intermediate={messageText:"Inspecting the canvas",historyItem:intermediateItem},summary={messageText:"Final summary",historyItem:summaryItem},otherTurn={messageText:"Other turn",historyItem:otherTurnItem},marked=[],
     canvasAgent={currentConversation:{items:[intermediateItem,toolItem,summaryItem,otherTurnItem]},assistantRows:new Map([["4:1:intermediate",intermediate],["3:8:other",otherTurn],["4:3:summary",summary]])};
-  const mark=vm.runInNewContext(`(()=>{${functionSource("canvasAgentAssistantPosition")}\n${functionSource("canvasAgentMarkTurnSummaryCopyable")}return canvasAgentMarkTurnSummaryCopyable;})()`,{canvasAgent,canvasAgentSetAssistantCopyReady:(target,ready)=>{target.historyItem.copyable=ready;marked.push(target);}});
+  const mark=vm.runInNewContext(`(()=>{${functionSource("canvasAgentAssistantPosition")}\n${functionSource("canvasAgentMarkTurnSummaryCopyable")}return canvasAgentMarkTurnSummaryCopyable;})()`,{canvasAgent,canvasAgentSetAssistantCopyReady:(target,ready)=>{target.historyItem.copyable=ready;marked.push(target);},canvasAgentSyncAssistantActions(){}});
   assert.equal(mark(4),true);
   assert.deepEqual(marked,[summary]);
   assert.equal(intermediate.historyItem.copyable,false);
@@ -268,6 +294,7 @@ test("PenEcho Agent restores copy only on final summaries from legacy history",(
 test("PenEcho Agent copies only the authoritative final assistant response",async()=>{
   const {document}=parseHTML("<!doctype html><html><body><div id=transcript><details>hidden tool execution and reasoning</details></div></body></html>"),clipboardWrites=[],renderer=messageAppender(document,clipboardWrites),append=renderer.append,transcript=document.querySelector("#transcript");
   const partial=append({role:"assistant",text:"temporary streamed draft",final:false},[],true);
+  assert.equal(partial.row.getAttribute("aria-label"),"canvasAgent","the visually quiet assistant row keeps an accessible role name");
   assert.equal(partial.copyActions.hasAttribute("hidden"),true,"streamed assistant deltas do not expose copy");
   assert.equal(partial.copyButton.disabled,true);
 
@@ -280,10 +307,19 @@ test("PenEcho Agent copies only the authoritative final assistant response",asyn
   const finalText="# Final summary\n\n- Completed the requested canvas change\n- Preserved the result exactly";
   const final=append({role:"assistant",text:finalText,final:true,copyable:true},[],true);
   assert.equal(final.copyActions.hasAttribute("hidden"),false);
-  assert.equal(final.copyButton.textContent,"Copy response");
+  assert.equal(final.copyButton.dataset.peButton,"icon");
+  assert.equal(final.copyButton.textContent,"");
+  assert.equal(final.copyButton.querySelector("svg")?.getAttribute("viewBox"),"0 0 24 24");
+  assert.equal(final.feedbackButtons.map(button=>button.dataset.action).join(","),"like,criticism");
+  assert.equal(final.feedbackButtons.map(button=>button.getAttribute("aria-label")).join(","),"Helpful,Needs improvement");
+  assert.equal(final.copyActions.querySelectorAll("button").length,4,"copy, helpful, needs-improvement, and retry remain separate actions");
+  assert.equal(final.copyButton.getAttribute("aria-label"),"Copy response");
+  assert.equal(final.copyButton.dataset.peState,"default");
   await renderer.copy(final);
   assert.deepEqual(clipboardWrites,[finalText]);
-  assert.equal(final.copyButton.textContent,"Copied");
+  assert.equal(final.copyButton.textContent,"");
+  assert.equal(final.copyButton.getAttribute("aria-label"),"Copied");
+  assert.equal(final.copyButton.dataset.peState,"success");
   assert.doesNotMatch(clipboardWrites[0],/tool execution|reasoning|user prompt|temporary streamed draft|inspect the canvas/);
   assert.match(transcript.textContent,/hidden tool execution and reasoning/,"execution UI remains visible but outside the copied payload");
 });

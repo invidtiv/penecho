@@ -42,7 +42,7 @@ function flatten(root) {
   return out;
 }
 
-function boot({ pathname = `/canvas/${CANVAS_ID}`, baseURI = "https://cloud.penecho.test/canvas/", language = "en-US", respond, openCanvas, takeFurther } = {}) {
+function boot({ pathname = `/canvas/${CANVAS_ID}`, baseURI = "https://cloud.penecho.test/canvas/", language = "en-US", respond, openCanvas, takeFurther, widgetFrames = [], nativeReads = false } = {}) {
   const topRow = new FakeElement("div");
   topRow.className = "top-row";
   const brand = new FakeElement("div");
@@ -59,6 +59,7 @@ function boot({ pathname = `/canvas/${CANVAS_ID}`, baseURI = "https://cloud.pene
       if (selector === ".remote-canvas-status") return flatten(topRow).find((el) => el.className === "remote-canvas-status") || null;
       return null;
     },
+    querySelectorAll:(selector) => selector === ".canvas-widget:not(.widget-offscreen) .canvas-widget-frame" ? widgetFrames : [],
   };
   const redirects = [];
   const location = {
@@ -70,9 +71,18 @@ function boot({ pathname = `/canvas/${CANVAS_ID}`, baseURI = "https://cloud.pene
   const opened = [];
   const taken = [];
   const windowObject = {
-    PENECHO_CONFIG:{ runtime:"cloud" },
+    PENECHO_CONFIG:{ runtime:"cloud", remoteCanvasNativeReads:nativeReads },
     PenEchoCloudProjects:{ openCanvas:openCanvas || (async (id) => { opened.push(id); }) },
     PenEchoCommunityUI:{ takeFurther:takeFurther || (async (id) => { taken.push(id); }) },
+  };
+  const windowListeners = new Map();
+  windowObject.addEventListener = (type, handler) => {
+    if (!windowListeners.has(type)) windowListeners.set(type, new Set());
+    windowListeners.get(type).add(handler);
+  };
+  windowObject.requestAnimationFrame = (callback) => setImmediate(() => callback(Date.now()));
+  windowObject.dispatchMessage = (data, source, origin = location.origin) => {
+    for (const handler of windowListeners.get("message") || []) handler({ data, source, origin });
   };
   const fetchCalls = [];
   windowObject.fetch = async (url, options = {}) => {
@@ -185,13 +195,44 @@ test("Remote Canvas gate shows no actions while checking and none once a linked 
   assert.deepEqual(offline.actions.map((el) => el.dataset.action), ["link"]);
   assert.deepEqual(actionRevealStates("link").filter((state) => state === "offline"), []);
 
-  const online = boot({ respond:() => ({ device:{ name:"My PenEcho", platform:"darwin 25.3.0", online:true } }) });
+  const online = boot({
+    respond:() => ({ device:{ name:"My PenEcho", platform:"darwin 25.3.0", online:true } }),
+    widgetFrames:[{ contentWindow:{} }],
+  });
   await flush();
   assert.equal(online.gate.dataset.state, "opening");
   assert.deepEqual(actionRevealStates("link").filter((state) => state === "opening"), []);
   assert.deepEqual(online.opened, [CANVAS_ID]);
   assert.deepEqual(online.redirects, [], "Cloud fallback must use the authenticated relay, not invent a LAN URL");
   assert.equal(online.gate.hidden, true);
+});
+
+test("Cloud Canvas stays covered until every visible Widget reports rendered content", async () => {
+  const firstWindow = {}, secondWindow = {}, run = boot({
+    respond:() => ({ device:{ name:"My PenEcho", platform:"darwin", online:true } }),
+    widgetFrames:[{ contentWindow:firstWindow }, { contentWindow:secondWindow }],
+    nativeReads:true,
+  });
+  await flush();
+  assert.equal(run.gate.dataset.state, "opening");
+  assert.equal(run.gate.hidden, false);
+
+  run.window.dispatchMessage({ type:"penecho-widget-host-ready" }, firstWindow);
+  run.window.dispatchMessage({ type:"penecho-widget-host-ready" }, secondWindow);
+  await flush();
+  assert.equal(run.gate.hidden, false, "an empty Widget host must not reveal the Canvas before its document renders");
+
+  run.window.dispatchMessage({ type:"penecho-widget-capture-ready" }, firstWindow);
+  await flush();
+  assert.equal(run.gate.hidden, false, "one ready Widget must not reveal a partially loaded Canvas");
+
+  run.window.dispatchMessage({ type:"penecho-widget-capture-ready" }, secondWindow, "https://untrusted.test");
+  await flush();
+  assert.equal(run.gate.hidden, false, "a cross-origin ready message must be ignored");
+
+  run.window.dispatchMessage({ type:"penecho-widget-capture-ready" }, secondWindow);
+  await flush();
+  assert.equal(run.gate.hidden, true);
 });
 
 test("Remote public Echo uses the linked-host bridge without redirecting to a guessed LAN origin", async () => {
@@ -252,7 +293,7 @@ test("Remote Canvas gate 401 response redirects to auth with returnTo", async ()
     href:`https://cloud.penecho.test/canvas/${CANVAS_ID}`,
     assign(url) { redirects.push(url); },
   };
-  const windowObject = { PENECHO_CONFIG:{ runtime:"cloud" } };
+  const windowObject = { PENECHO_CONFIG:{ runtime:"cloud" }, addEventListener() {} };
   windowObject.fetch = async () => ({ ok:false, status:401, json:async () => ({}) });
   vm.runInNewContext(gateScript, {
     window:windowObject, document, location, navigator:{ language:"en-US" },
@@ -290,6 +331,45 @@ test("Remote Canvas gate keeps the cloud fetch bridge and community take-further
   const direct = await run.window.fetch("/api/ai/command", { method:"POST" });
   assert.equal(direct.ok, true);
   assert.equal(run.fetchCalls.at(-1).url, "/api/ai/command");
+  await run.window.fetch("/api/plugins");
+  assert.match(run.fetchCalls.at(-1).url, /path=%2Fapi%2Fplugins$/, "the default Cloud client keeps the production linked-host plugin protocol");
+  await run.window.fetch("/api/plugins?scope=private");
+  assert.equal(run.fetchCalls.at(-1).url, "/api/v1/remote-canvas/http?path=%2Fapi%2Fplugins%3Fscope%3Dprivate");
+
+  await run.window.fetch(`/api/cloud/canvases/${CANVAS_ID}`);
+  assert.match(run.fetchCalls.at(-1).url, /path=%2Fapi%2Fcloud%2Fcanvases%2F/, "the default Cloud client keeps the production linked-host Canvas protocol");
+  await run.window.fetch(`/api/canvases/${CANVAS_ID}`);
+  assert.match(run.fetchCalls.at(-1).url, /path=%2Fapi%2Fcanvases%2F/, "Cloud reading a host Canvas remains bridged");
+  await run.window.fetch(`/api/cloud/canvases/${CANVAS_ID}/save`, { method:"POST", body:"{}" });
+  assert.match(run.fetchCalls.at(-1).url, /path=%2Fapi%2Fcloud%2Fcanvases%2F.*%2Fsave/, "Cloud saves remain host-owned and bridged");
+});
+
+test("native Cloud Canvas reads remain dormant behind the explicit runtime flag", async () => {
+  const run = boot({
+    nativeReads:true,
+    respond:() => ({ device:{ name:"Host", platform:"linux", online:true } }),
+  });
+  await flush();
+
+  await run.window.fetch("/api/plugins");
+  assert.equal(run.fetchCalls.at(-1).url, "/api/plugins");
+  await run.window.fetch("/api/plugins?scope=private");
+  assert.equal(run.fetchCalls.at(-1).url, "/api/v1/remote-canvas/http?path=%2Fapi%2Fplugins%3Fscope%3Dprivate");
+  await run.window.fetch(`/api/cloud/canvases/${CANVAS_ID}`);
+  assert.equal(run.fetchCalls.at(-1).url, `/api/cloud/canvases/${CANVAS_ID}`);
+});
+
+test("desktop runtime keeps its existing direct Cloud sync path", async () => {
+  const calls = [], windowObject = {
+    PENECHO_CONFIG:{ runtime:"local" },
+    fetch:async (url) => { calls.push(String(url)); return { ok:true, status:200 }; },
+  };
+  vm.runInNewContext(gateScript, {
+    window:windowObject,
+    location:{ pathname:`/canvas/${CANVAS_ID}` },
+  }, { filename:"public/remote-canvas.js" });
+  await windowObject.fetch(`/api/cloud/canvases/${CANVAS_ID}`);
+  assert.deepEqual(calls, [`/api/cloud/canvases/${CANVAS_ID}`]);
 });
 
 test("Remote Canvas fetch wrapper preserves the Canvas base URL on nested community routes", async () => {
@@ -321,7 +401,7 @@ test("Remote Canvas gate stays compact, accessible and mobile-friendly", () => {
   assert.match(gateScript, /gate\.setAttribute\("aria-live", "polite"\)/);
   assert.match(gateScript, /card\.setAttribute\("aria-labelledby", "remoteCanvasTitle"\)/);
   assert.match(gateCss, /\.remote-canvas-card\s*\{[^}]*max-width:\s*480px/);
-  assert.match(gateCss, /\.remote-canvas-card h2\s*\{[^}]*font-size:\s*20px[^}]*letter-spacing:\s*0/);
+  assert.match(gateCss, /\.remote-canvas-card h2\s*\{[^}]*font-size:\s*17px[^}]*font-weight:\s*600[^}]*letter-spacing:\s*normal/);
   assert.match(gateCss, /\.remote-canvas-actions a\s*\{[^}]*min-height:\s*36px/);
   assert.match(gateCss, /@media \(pointer: coarse\)\s*\{[^}]*\.remote-canvas-actions a\s*\{\s*min-height:\s*44px/);
   assert.doesNotMatch(gateCss, /font-size:\s*clamp|letter-spacing:\s*-/);
