@@ -20,7 +20,7 @@
 <h1 align="center">AI와 함께 생각하는<br>공간형 작업 환경.</h1>
 <p align="center">내장 Agent 또는 MCP 호환 AI 어시스턴트로 그리고, 탐색하고, 만들어 보세요.</p>
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.3.2-087f83" alt="버전 1.3.2">
+  <img src="https://img.shields.io/badge/version-1.3.3-087f83" alt="버전 1.3.3">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="AGPL-3.0-only"></a>
 </p>
 <p align="center">
@@ -67,6 +67,60 @@ MCP를 통해 AI는 설명을 다이어그램으로, 아이디어를 대화형 �
 </p>
 <p align="center"><em>Canvas에 손글씨 주석을 더한 아키텍처 논의.</em></p>
 
+<!-- professional-diagram-gallery -->
+<p align="center">다양한 <strong>전문 다이어그램</strong>을 그리고, 편리하게 살펴보며 상호작용하세요.</p>
+
+<table width="100%">
+  <tr>
+    <th colspan="2" align="left">아키텍처 다이어그램</th>
+  </tr>
+  <tr>
+    <td width="50%" align="center" valign="middle">
+      <a href="../assets/professional-diagrams/kubernetes.webp"><img src="../assets/professional-diagrams/previews/kubernetes.webp" alt="Kubernetes 프로덕션 클러스터" width="100%"></a>
+    </td>
+    <td width="50%" align="center" valign="middle">
+      <a href="../assets/professional-diagrams/migration.webp"><img src="../assets/professional-diagrams/previews/migration.webp" alt="모놀리스에서 마이크로서비스로" width="100%"></a>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top"><strong>Kubernetes 프로덕션 클러스터</strong></td>
+    <td valign="top"><strong>모놀리스에서 마이크로서비스로</strong></td>
+  </tr>
+  <tr>
+    <th colspan="2" align="left">시퀀스 다이어그램</th>
+  </tr>
+  <tr>
+    <td width="50%" align="center" valign="middle">
+      <a href="../assets/professional-diagrams/notifications.webp"><img src="../assets/professional-diagrams/previews/notifications.webp" alt="이벤트 기반 알림" width="100%"></a>
+    </td>
+    <td width="50%" align="center" valign="middle">
+      <a href="../assets/professional-diagrams/mcp-request.webp"><img src="../assets/professional-diagrams/previews/mcp-request.webp" alt="MCP 요청이 Canvas에 도달하는 과정" width="100%"></a>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top"><strong>이벤트 기반 알림</strong></td>
+    <td valign="top"><strong>MCP 요청이 Canvas에 도달하는 과정</strong></td>
+  </tr>
+  <tr>
+    <th colspan="2" align="left">워크플로</th>
+  </tr>
+  <tr>
+    <td width="50%" align="center" valign="middle">
+      <a href="../assets/professional-diagrams/release.webp"><img src="../assets/professional-diagrams/previews/release.webp" alt="릴리스 준비: 병렬 작업과 합류" width="100%"></a>
+    </td>
+    <td width="50%" align="center" valign="middle">
+      <a href="../assets/professional-diagrams/rollout.webp"><img src="../assets/professional-diagrams/previews/rollout.webp" alt="다중 리전 배포와 롤백" width="100%"></a>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top"><strong>릴리스 준비: 병렬 작업과 합류</strong></td>
+    <td valign="top"><strong>다중 리전 배포와 롤백</strong></td>
+  </tr>
+</table>
+
+<p align="center"><sub>이미지를 클릭하면 원본 크기로 볼 수 있습니다.</sub></p>
+<!-- /professional-diagram-gallery -->
+
 **완성되기 전부터 확인하세요.** AI와 대화하며 결과가 만들어지는 과정을 보고, 직접 사용해 보고, 피드백을 주며 함께 프로젝트를 진행하세요.
 
 [MCP로 에이전트 연결 →](#connect-your-agent-with-mcp)
@@ -78,15 +132,17 @@ MCP를 통해 AI는 설명을 다이어그램으로, 아이디어를 대화형 �
 - **자신의 에이전트를 연결하세요.** Codex, Claude Code 등 MCP 호환 클라이언트를 연결해 명시적으로 활성화한 Canvas를 읽고 편집합니다.
 - **작업을 보관하고 공유하세요.** Canvas를 프로젝트로 정리하고, Cloud 버전을 저장하고, 즐겨찾기를 동기화하고, Echoes로 게시합니다.
 
-## 1.3.2의 새로운 기능
+## 1.3.3의 새로운 기능
 
-| 업데이트 | 추가된 기능 |
+| 다이어그램 | 그릴 수 있는 내용 |
 | --- | --- |
-| **MCP 작업 공간** | 외부 에이전트용 Canvas 검색, 캡처, 객체 편집, 대화형 Widgets, 가상 소스 파일, 사용자 피드백. 명시적으로 허용한 로컬, LAN, 연결된 기기를 통한 Cloud 브라우저를 지원합니다. |
-| **Cloud MCP** | 외부 AI 에이전트를 활성화된 PenEcho Cloud 캔버스에 직접 연결해 콘텐츠를 읽고, 결과를 만들고 편집하고, 손글씨 피드백을 확인합니다. Cloud MCP와 Local MCP는 모두 선택적인 연결 방식입니다. |
-| **PenEcho Cloud Credits API** | 자신의 API 및 CLI 연결과 함께 계정 크레딧으로 PenEcho 호스팅 모델을 사용할 수 있습니다. 설정에서 사용 가능한 모델, 요금, 잔액을 확인합니다. |
-| **연결 관리** | 여러 AI 연결을 저장하고 클라이언트마다 사용할 연결을 선택합니다. |
-| **Canvas와 워크벤치** | 향상된 그리기 및 탐색 반응성, 개선된 Studio 컨트롤, 적응형 Agent 패널, 사용자 지정 키보드 단축키. |
+| **아키텍처 다이어그램** | 서비스, 의존 관계, 중첩된 시스템 경계를 자동 배치하고 연결선 경로를 계산합니다. |
+| **시퀀스 다이어그램** | 참여자와 메시지 순서를 표현하며 응답, 자기 호출, 조건·반복·병렬 구간을 지원합니다. |
+| **워크플로** | 단계, 판단, 조건이 표시된 분기, 반복, 분기와 합류가 있는 병렬 흐름을 그립니다. |
+
+PenEcho Agent 또는 MCP로 연결한 에이전트에 요구 사항을 설명하세요. Canvas에서 세부 내용을 확인하고 피드백으로 수정한 뒤 SVG / PNG로 내보낼 수 있습니다.
+
+[전체 변경 기록](../../CHANGELOG.md#133)
 
 ## 작동 방식
 
@@ -186,3 +242,19 @@ npm start
 기여하려면 [CONTRIBUTING.md](../../CONTRIBUTING.md)를 읽고 풀 리퀘스트 전에 `npm run check`를 실행하세요. 버그는 [Issues](https://github.com/penecho/penecho/issues), 아이디어는 [Discussions](https://github.com/penecho/penecho/discussions), 커뮤니티 참여는 [Discord](https://discord.gg/3jrPJ3mXdX)를 이용하세요.
 
 [AGPL-3.0-only](../../LICENSE) 라이선스가 적용됩니다. 별도의 [상용 라이선스](../../COMMERCIAL-LICENSE.md)도 이용할 수 있습니다. [상표 정책](../../TRADEMARKS.md)과 [기여자 계약](../../CONTRIBUTOR-LICENSE-AGREEMENT.md)을 확인하세요.
+
+## 감사의 말
+
+tt-a1i의 [Archify](https://github.com/tt-a1i/archify) 프로젝트에 감사드립니다. PenEcho의 전문 다이어그램 렌더러는 이 MIT 라이선스 프로젝트의 SVG 및 기하 처리 보조 코드를 수정해 사용합니다. [MIT 라이선스와 저작권 고지](../../src/architecture/vendor/archify/LICENSE)를 보존하고 있으며, 제3자 출처는 [NOTICE](../../NOTICE)에서 확인할 수 있습니다.
+
+## 스타 기록
+
+<p align="center">
+  <a href="https://www.star-history.com/?repos=penecho%2Fpenecho&amp;type=date&amp;legend=top-left">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=penecho/penecho&amp;type=date&amp;theme=dark&amp;legend=top-left">
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=penecho/penecho&amp;type=date&amp;legend=top-left">
+      <img src="https://api.star-history.com/chart?repos=penecho/penecho&amp;type=date&amp;legend=top-left" alt="PenEcho GitHub 스타 증가 기록 차트" width="800">
+    </picture>
+  </a>
+</p>

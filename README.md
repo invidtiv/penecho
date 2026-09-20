@@ -20,7 +20,7 @@
 <h1 align="center">A spatial workspace<br>for thinking with AI.</h1>
 <p align="center">Draw, explore, and build with the built-in Agent or your own MCP-compatible assistant.</p>
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.3.2-087f83" alt="Version 1.3.2">
+  <img src="https://img.shields.io/badge/version-1.3.3-087f83" alt="Version 1.3.3">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="AGPL-3.0-only"></a>
 </p>
 <p align="center">
@@ -67,6 +67,60 @@ Through MCP, your AI can turn explanations into diagrams and ideas into interact
 </p>
 <p align="center"><em>An architecture discussion, annotated by hand on the Canvas.</em></p>
 
+<!-- professional-diagram-gallery -->
+<p align="center">Draw <strong>professional diagrams</strong> that are easy to explore and interact with.</p>
+
+<table width="100%">
+  <tr>
+    <th colspan="2" align="left">Architecture</th>
+  </tr>
+  <tr>
+    <td width="50%" align="center" valign="middle">
+      <a href="docs/assets/professional-diagrams/kubernetes.webp"><img src="docs/assets/professional-diagrams/previews/kubernetes.webp" alt="Kubernetes production cluster" width="100%"></a>
+    </td>
+    <td width="50%" align="center" valign="middle">
+      <a href="docs/assets/professional-diagrams/migration.webp"><img src="docs/assets/professional-diagrams/previews/migration.webp" alt="Monolith-to-microservices migration" width="100%"></a>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top"><strong>Kubernetes production cluster</strong></td>
+    <td valign="top"><strong>Monolith-to-microservices migration</strong></td>
+  </tr>
+  <tr>
+    <th colspan="2" align="left">Sequences</th>
+  </tr>
+  <tr>
+    <td width="50%" align="center" valign="middle">
+      <a href="docs/assets/professional-diagrams/notifications.webp"><img src="docs/assets/professional-diagrams/previews/notifications.webp" alt="Event-driven notifications" width="100%"></a>
+    </td>
+    <td width="50%" align="center" valign="middle">
+      <a href="docs/assets/professional-diagrams/mcp-request.webp"><img src="docs/assets/professional-diagrams/previews/mcp-request.webp" alt="How MCP requests reach the Canvas" width="100%"></a>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top"><strong>Event-driven notifications</strong></td>
+    <td valign="top"><strong>How MCP requests reach the Canvas</strong></td>
+  </tr>
+  <tr>
+    <th colspan="2" align="left">Workflows</th>
+  </tr>
+  <tr>
+    <td width="50%" align="center" valign="middle">
+      <a href="docs/assets/professional-diagrams/release.webp"><img src="docs/assets/professional-diagrams/previews/release.webp" alt="Release preparation: parallel tasks" width="100%"></a>
+    </td>
+    <td width="50%" align="center" valign="middle">
+      <a href="docs/assets/professional-diagrams/rollout.webp"><img src="docs/assets/professional-diagrams/previews/rollout.webp" alt="Multi-region rollout and rollback" width="100%"></a>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top"><strong>Release preparation: parallel tasks</strong></td>
+    <td valign="top"><strong>Multi-region rollout and rollback</strong></td>
+  </tr>
+</table>
+
+<p align="center"><sub>Click an image to view the full-size diagram.</sub></p>
+<!-- /professional-diagram-gallery -->
+
 **See it before it’s finished.** See the work take shape as you talk with AI. Try it, give feedback, and move your project forward together.
 
 [Connect your agent with MCP →](#connect-your-agent-with-mcp)
@@ -78,15 +132,17 @@ Through MCP, your AI can turn explanations into diagrams and ideas into interact
 - **Bring your own agent.** Connect Codex, Claude Code, or another MCP-compatible client to read and edit an explicitly enabled Canvas.
 - **Keep and share your work.** Organize Canvases into projects, save Cloud revisions, sync favorites, and publish through Echoes.
 
-## New in 1.3.2
+## New in 1.3.3
 
-| Update | What it adds |
+| Diagram | What you can draw |
 | --- | --- |
-| **MCP workspace** | Canvas discovery, captures, object editing, interactive Widgets, virtual source files, and user feedback for external agents. Supports opted-in local, LAN, and linked-device Cloud browsers. |
-| **Cloud MCP** | Connect external AI agents directly to your enabled PenEcho Cloud canvases to read content, create and edit results, and follow handwritten feedback. Cloud MCP and Local MCP are optional connection paths. |
-| **PenEcho Cloud Credits API** | Use PenEcho-hosted models with account credits, alongside your own API and CLI connections. View available models, rates, and balance in Settings. |
-| **Connection management** | Save multiple AI connections and choose the active connection for each client. |
-| **Canvas and workbench** | More responsive drawing and navigation, refined Studio controls, an adaptive Agent panel, and customizable keyboard shortcuts. |
+| **Architecture diagrams** | Model services, dependencies, and nested system boundaries with automatic layout and routed connections. |
+| **Sequence diagrams** | Show participants and message order, including replies, self-calls, and conditional, loop, or parallel fragments. |
+| **Workflows** | Map steps, decisions, labeled branches, loops, and parallel paths with fork/join points. |
+
+Describe your requirements to PenEcho Agent or an MCP-connected agent. Inspect details on the Canvas, refine the result through feedback, and export SVG or PNG.
+
+[Full changelog](CHANGELOG.md#133)
 
 ## How it works
 
@@ -182,3 +238,19 @@ These recommendations balance answer quality against the latency of PenEcho's re
 Read [CONTRIBUTING.md](CONTRIBUTING.md) to contribute; run `npm run check` before opening a pull request. Report bugs in [Issues](https://github.com/penecho/penecho/issues), discuss ideas in [Discussions](https://github.com/penecho/penecho/discussions), or join [Discord](https://discord.gg/3jrPJ3mXdX).
 
 Licensed under [AGPL-3.0-only](LICENSE). Alternative [commercial licensing](COMMERCIAL-LICENSE.md) is available. See the [trademark policy](TRADEMARKS.md) and [contributor agreement](CONTRIBUTOR-LICENSE-AGREEMENT.md).
+
+## Acknowledgements
+
+Thanks to [Archify](https://github.com/tt-a1i/archify) by tt-a1i. PenEcho’s professional diagram renderers use adapted SVG and geometry helpers from this MIT-licensed project. The [MIT license and copyright notices](src/architecture/vendor/archify/LICENSE) are preserved; see [NOTICE](NOTICE) for third-party attribution.
+
+## Star History
+
+<p align="center">
+  <a href="https://www.star-history.com/?repos=penecho%2Fpenecho&amp;type=date&amp;legend=top-left">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=penecho/penecho&amp;type=date&amp;theme=dark&amp;legend=top-left">
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=penecho/penecho&amp;type=date&amp;legend=top-left">
+      <img src="https://api.star-history.com/chart?repos=penecho/penecho&amp;type=date&amp;legend=top-left" alt="PenEcho GitHub star history chart" width="800">
+    </picture>
+  </a>
+</p>

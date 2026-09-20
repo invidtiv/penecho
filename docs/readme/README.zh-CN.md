@@ -20,7 +20,7 @@
 <h1 align="center">与 AI 一起思考的<br>空间工作台。</h1>
 <p align="center">手写、探索、创作，让内置 Agent 或你自己的 MCP 助手加入同一块画布。</p>
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.3.2-087f83" alt="版本 1.3.2">
+  <img src="https://img.shields.io/badge/version-1.3.3-087f83" alt="版本 1.3.3">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="AGPL-3.0-only"></a>
 </p>
 <p align="center">
@@ -67,6 +67,60 @@
 </p>
 <p align="center"><em>在画布上讨论架构，并用手写标注提出反馈。</em></p>
 
+<!-- professional-diagram-gallery -->
+<p align="center">支持各种<strong>专业图表</strong>的绘制，方便查看和交互。</p>
+
+<table width="100%">
+  <tr>
+    <th colspan="2" align="left">架构图</th>
+  </tr>
+  <tr>
+    <td width="50%" align="center" valign="middle">
+      <a href="../assets/professional-diagrams/kubernetes.webp"><img src="../assets/professional-diagrams/previews/kubernetes.webp" alt="Kubernetes 生产集群拓扑" width="100%"></a>
+    </td>
+    <td width="50%" align="center" valign="middle">
+      <a href="../assets/professional-diagrams/migration.webp"><img src="../assets/professional-diagrams/previews/migration.webp" alt="单体到微服务迁移架构" width="100%"></a>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top"><strong>Kubernetes 生产集群拓扑</strong></td>
+    <td valign="top"><strong>单体到微服务迁移架构</strong></td>
+  </tr>
+  <tr>
+    <th colspan="2" align="left">时序图</th>
+  </tr>
+  <tr>
+    <td width="50%" align="center" valign="middle">
+      <a href="../assets/professional-diagrams/notifications.webp"><img src="../assets/professional-diagrams/previews/notifications.webp" alt="事件驱动通知" width="100%"></a>
+    </td>
+    <td width="50%" align="center" valign="middle">
+      <a href="../assets/professional-diagrams/mcp-request.webp"><img src="../assets/professional-diagrams/previews/mcp-request.webp" alt="MCP 请求如何到达画布" width="100%"></a>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top"><strong>事件驱动通知</strong></td>
+    <td valign="top"><strong>MCP 请求如何到达画布</strong></td>
+  </tr>
+  <tr>
+    <th colspan="2" align="left">工作流</th>
+  </tr>
+  <tr>
+    <td width="50%" align="center" valign="middle">
+      <a href="../assets/professional-diagrams/release.webp"><img src="../assets/professional-diagrams/previews/release.webp" alt="发布准备：并行与汇合" width="100%"></a>
+    </td>
+    <td width="50%" align="center" valign="middle">
+      <a href="../assets/professional-diagrams/rollout.webp"><img src="../assets/professional-diagrams/previews/rollout.webp" alt="多区域发布与回滚" width="100%"></a>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top"><strong>发布准备：并行与汇合</strong></td>
+    <td valign="top"><strong>多区域发布与回滚</strong></td>
+  </tr>
+</table>
+
+<p align="center"><sub>点击图片查看完整大图。</sub></p>
+<!-- /professional-diagram-gallery -->
+
 **在完成之前，先看到它的样子。** 在与 AI 的交互中，看见项目逐步成形。先试一试，再给出反馈，一起把项目向前推进。
 
 [通过 MCP 接入你的 Agent →](#通过-mcp-接入你的-agent)
@@ -78,15 +132,17 @@
 - **接入自己的 Agent。** 通过 MCP，让 Codex、Claude Code 或其他兼容客户端读写你明确开放的 Canvas。
 - **保存与分享。** 用项目组织画布，保存云端版本、同步收藏，通过 Echoes 发布作品。
 
-## 1.3.2 新内容
+## 1.3.3 新内容
 
-| 更新 | 带来的能力 |
+| 图表类型 | 支持的画法 |
 | --- | --- |
-| **MCP 工作空间** | 画布发现、截图、对象编辑、交互 Widget、虚拟源文件和用户反馈；支持明确开放的本机、局域网和关联设备云端浏览器。 |
-| **Cloud MCP** | 外部 AI Agent 可直接连接已启用的 PenEcho Cloud 画布，读取内容、创建和编辑成果，并根据手写批注继续完善。Cloud MCP 与 Local MCP 均为可选连接方式。 |
-| **PenEcho Cloud Credits API** | 使用账号积分调用 PenEcho 托管模型，也可继续使用自己的 API 或 CLI；设置中可查看可用模型、费率和余额。 |
-| **连接管理** | 保存多个 AI 连接，为不同客户端选择各自的活动连接。 |
-| **画布与工作台** | 更流畅的绘写和导航、更简洁的 Studio 控件、自适应 Agent 面板与可自定义的快捷键。 |
+| **架构图** | 绘制服务、依赖关系与多层系统边界，自动布局并规划连线路径。 |
+| **时序图** | 展示参与者与消息先后，支持返回、自调用，以及条件、循环和并行片段。 |
+| **工作流** | 组织步骤、判断、带条件的分支与循环，通过分叉和汇合表达并行流程。 |
+
+向 PenEcho Agent 或通过 MCP 接入的 Agent 描述需求，即可在画布中查看图表细节、反馈修改，并导出 SVG / PNG。
+
+[完整更新记录](../../CHANGELOG.md#133)
 
 ## 工作原理
 
@@ -182,3 +238,19 @@ Agent 可以查看相关内容、编辑对象、创建可视化结果、修改�
 参与贡献请阅读 [CONTRIBUTING.md](../../CONTRIBUTING.md)，提交 PR 前运行 `npm run check`。欢迎在 [Issues](https://github.com/penecho/penecho/issues) 报告问题、在 [Discussions](https://github.com/penecho/penecho/discussions) 交流，或加入 [Discord](https://discord.gg/3jrPJ3mXdX)。
 
 采用 [AGPL-3.0-only](../../LICENSE) 许可，同时提供[商业许可](../../COMMERCIAL-LICENSE.md)。另见[商标政策](../../TRADEMARKS.md)和[贡献者协议](../../CONTRIBUTOR-LICENSE-AGREEMENT.md)。
+
+## 致谢
+
+感谢 tt-a1i 的 [Archify](https://github.com/tt-a1i/archify) 项目。PenEcho 的专业图表渲染器使用了该项目经适配的 SVG 与几何辅助代码，并保留完整的 [MIT 许可及版权声明](../../src/architecture/vendor/archify/LICENSE)。第三方署名详见 [NOTICE](../../NOTICE)。
+
+## Star 历史
+
+<p align="center">
+  <a href="https://www.star-history.com/?repos=penecho%2Fpenecho&amp;type=date&amp;legend=top-left">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=penecho/penecho&amp;type=date&amp;theme=dark&amp;legend=top-left">
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=penecho/penecho&amp;type=date&amp;legend=top-left">
+      <img src="https://api.star-history.com/chart?repos=penecho/penecho&amp;type=date&amp;legend=top-left" alt="PenEcho GitHub Star 增长历史图" width="800">
+    </picture>
+  </a>
+</p>

@@ -20,7 +20,7 @@
 <h1 align="center">Пространство для работы<br>и размышлений с ИИ.</h1>
 <p align="center">Рисуйте, исследуйте и создавайте со встроенным Agent или своим ИИ-ассистентом с поддержкой MCP.</p>
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.3.2-087f83" alt="Версия 1.3.2">
+  <img src="https://img.shields.io/badge/version-1.3.3-087f83" alt="Версия 1.3.3">
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="AGPL-3.0-only"></a>
 </p>
 <p align="center">
@@ -67,6 +67,60 @@
 </p>
 <p align="center"><em>Обсуждение архитектуры с рукописными пометками на Canvas.</em></p>
 
+<!-- professional-diagram-gallery -->
+<p align="center">Создавайте <strong>профессиональные диаграммы</strong>, которые удобно изучать и с которыми легко взаимодействовать.</p>
+
+<table width="100%">
+  <tr>
+    <th colspan="2" align="left">Архитектура</th>
+  </tr>
+  <tr>
+    <td width="50%" align="center" valign="middle">
+      <a href="../assets/professional-diagrams/kubernetes.webp"><img src="../assets/professional-diagrams/previews/kubernetes.webp" alt="Кластер Kubernetes в продакшене" width="100%"></a>
+    </td>
+    <td width="50%" align="center" valign="middle">
+      <a href="../assets/professional-diagrams/migration.webp"><img src="../assets/professional-diagrams/previews/migration.webp" alt="Миграция к микросервисам" width="100%"></a>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top"><strong>Кластер Kubernetes в продакшене</strong></td>
+    <td valign="top"><strong>Миграция к микросервисам</strong></td>
+  </tr>
+  <tr>
+    <th colspan="2" align="left">Диаграммы последовательностей</th>
+  </tr>
+  <tr>
+    <td width="50%" align="center" valign="middle">
+      <a href="../assets/professional-diagrams/notifications.webp"><img src="../assets/professional-diagrams/previews/notifications.webp" alt="Событийные уведомления" width="100%"></a>
+    </td>
+    <td width="50%" align="center" valign="middle">
+      <a href="../assets/professional-diagrams/mcp-request.webp"><img src="../assets/professional-diagrams/previews/mcp-request.webp" alt="Как запросы MCP достигают Canvas" width="100%"></a>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top"><strong>Событийные уведомления</strong></td>
+    <td valign="top"><strong>Как запросы MCP достигают Canvas</strong></td>
+  </tr>
+  <tr>
+    <th colspan="2" align="left">Рабочие процессы</th>
+  </tr>
+  <tr>
+    <td width="50%" align="center" valign="middle">
+      <a href="../assets/professional-diagrams/release.webp"><img src="../assets/professional-diagrams/previews/release.webp" alt="Подготовка релиза: параллельные задачи" width="100%"></a>
+    </td>
+    <td width="50%" align="center" valign="middle">
+      <a href="../assets/professional-diagrams/rollout.webp"><img src="../assets/professional-diagrams/previews/rollout.webp" alt="Развёртывание и откат в нескольких регионах" width="100%"></a>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top"><strong>Подготовка релиза: параллельные задачи</strong></td>
+    <td valign="top"><strong>Развёртывание и откат в нескольких регионах</strong></td>
+  </tr>
+</table>
+
+<p align="center"><sub>Нажмите на изображение, чтобы открыть диаграмму в полном размере.</sub></p>
+<!-- /professional-diagram-gallery -->
+
 **Смотрите на результат ещё до завершения.** Наблюдайте, как он складывается в ходе разговора с ИИ. Пробуйте, оставляйте обратную связь и вместе продвигайте проект.
 
 [Подключить агента через MCP →](#connect-your-agent-with-mcp)
@@ -78,15 +132,17 @@
 - **Подключайте своего агента.** Codex, Claude Code и другие MCP-совместимые клиенты могут читать и редактировать Canvas, для которого вы явно разрешили доступ.
 - **Сохраняйте и делитесь.** Объединяйте Canvas в проекты, сохраняйте версии в Cloud, синхронизируйте избранное и публикуйте через Echoes.
 
-## Новое в 1.3.2
+## Новое в 1.3.3
 
-| Обновление | Что добавлено |
+| Тип диаграммы | Что можно нарисовать |
 | --- | --- |
-| **Рабочее пространство MCP** | Обнаружение Canvas, снимки, редактирование объектов, интерактивные Widgets, виртуальные исходные файлы и обратная связь для внешних агентов. Поддерживаются явно разрешённые подключения локальных браузеров, браузеров в LAN и Cloud-браузеров через привязанное устройство. |
-| **Cloud MCP** | Подключайте внешних ИИ-агентов напрямую к разрешённым холстам PenEcho Cloud для чтения содержимого, создания и редактирования результатов и работы с рукописными замечаниями. Cloud MCP и Local MCP — необязательные способы подключения. |
-| **PenEcho Cloud Credits API** | Используйте модели, размещённые PenEcho, за кредиты аккаунта наряду со своими API- и CLI-подключениями. Доступные модели, тарифы и баланс показаны в настройках. |
-| **Управление подключениями** | Сохраняйте несколько ИИ-подключений и выбирайте активное для каждого клиента. |
-| **Canvas и рабочая среда** | Более отзывчивые рисование и навигация, улучшенные элементы управления Studio, адаптивная панель Agent и настраиваемые сочетания клавиш. |
+| **Архитектурные диаграммы** | Показывайте сервисы, зависимости и вложенные границы систем с автоматической компоновкой и прокладкой связей. |
+| **Диаграммы последовательностей** | Отображайте участников и порядок сообщений, включая ответы, вызовы самого себя, условные, циклические и параллельные фрагменты. |
+| **Рабочие процессы** | Описывайте шаги, решения, ветви с условиями, циклы и параллельные пути с точками разделения и объединения. |
+
+Опишите требования PenEcho Agent или агенту, подключённому через MCP. Изучайте детали на Canvas, уточняйте результат обратной связью и экспортируйте в SVG или PNG.
+
+[Полный журнал изменений](../../CHANGELOG.md#133)
 
 ## Как это работает
 
@@ -186,3 +242,19 @@ npm start
 Для участия прочитайте [CONTRIBUTING.md](../../CONTRIBUTING.md) и выполните `npm run check` перед открытием pull request. Сообщайте об ошибках в [Issues](https://github.com/penecho/penecho/issues), обсуждайте идеи в [Discussions](https://github.com/penecho/penecho/discussions) или присоединяйтесь к [Discord](https://discord.gg/3jrPJ3mXdX).
 
 Лицензия — [AGPL-3.0-only](../../LICENSE). Доступна альтернативная [коммерческая лицензия](../../COMMERCIAL-LICENSE.md). См. [политику товарных знаков](../../TRADEMARKS.md) и [соглашение с участниками](../../CONTRIBUTOR-LICENSE-AGREEMENT.md).
+
+## Благодарности
+
+Благодарим tt-a1i за проект [Archify](https://github.com/tt-a1i/archify). Средства отрисовки профессиональных диаграмм PenEcho используют адаптированные вспомогательные функции SVG и геометрии из этого проекта под лицензией MIT. [Лицензия MIT и уведомления об авторских правах](../../src/architecture/vendor/archify/LICENSE) сохранены; сведения о сторонних компонентах приведены в [NOTICE](../../NOTICE).
+
+## История звёзд
+
+<p align="center">
+  <a href="https://www.star-history.com/?repos=penecho%2Fpenecho&amp;type=date&amp;legend=top-left">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=penecho/penecho&amp;type=date&amp;theme=dark&amp;legend=top-left">
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=penecho/penecho&amp;type=date&amp;legend=top-left">
+      <img src="https://api.star-history.com/chart?repos=penecho/penecho&amp;type=date&amp;legend=top-left" alt="График роста числа звёзд PenEcho на GitHub" width="800">
+    </picture>
+  </a>
+</p>
