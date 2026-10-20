@@ -2368,15 +2368,15 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       tourFullscreenTitle: "Give the canvas the whole screen",
       tourFullscreenBody: "Fullscreen hides surrounding browser space and expands the drawing area. Use the same button—or your browser's fullscreen shortcut—to return.",
       tourFavoritesTitle: "Add something from Favorites",
-      tourFavoritesBody: "Use the star button to open your Echoes favorites. Add a favorite Widget to the current Canvas, or open a favorite Canvas here as a new Canvas.",
+      tourFavoritesBody: "Use the star button to open your saved favorites. Add a favorite Widget to the current Canvas, or open a favorite Canvas here as a new Canvas.",
       tourNotesCardsTitle: "Keep useful ideas in Notes & Cards",
       tourNotesCardsBody: "Use Organize as Note on selected content, then save the result to Notes & Cards. Open More → Notes & cards, or Library → Notes & cards, to read, search and add saved notes to another canvas. Saved notes remain available independently of their original canvas.",
       tourAssistTitle: "Choose your next step with Assist",
       tourAssistBody: "Pause after writing or adding text and images to see suggested actions near your content. Choose an action, open More for other options, or use Ask to write your own question. You can also lasso existing content to get suggestions for that selection.",
       tourShareCanvasTitle: "Share this Canvas",
-      tourShareCanvasBody: "Share creates a read-only link to the latest Cloud Canvas. Anyone with the link can see future saved changes. Use Echo to publish a separate Craft to Echoes.",
+      tourShareCanvasBody: "Share creates a read-only link to the latest Cloud Canvas. Anyone with the link can see future saved changes. Choose Share publicly to appear on PenEcho after review.",
       tourCloudTitle: "Keep private work in PenEcho Cloud",
-      tourCloudBody: "Open Cloud to sign in, save and reopen private versioned Canvases by project, and use favorite Canvases or Widgets from Echoes in your current Canvas.",
+      tourCloudBody: "Open Cloud to sign in, save and reopen private versioned Canvases by project, and use favorite Canvases or publicly shared Widgets in your current Canvas.",
       tourManualAITitle: "Run Auto AI on demand",
       tourManualAIBody: "Click the AI button to run the same prompt used by Auto AI immediately. It uses the current canvas context—or only the lasso selection when one is active.",
       tourStatusTitle: "Follow every AI request and result",
@@ -3094,7 +3094,7 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       savedView: "View",
       savedListView: "List view",
       savedGridView: "Grid view",
-      browseEchoes: "Browse Echoes",
+      browseEchoes: "Browse public shares",
       savedCount: "{count} favorites",
       savedLoading: "Loading favorites…",
       savedRefreshing: "Refreshing…",
@@ -3137,7 +3137,7 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
       favoriteCanvases: "Favorite Canvases",
       favoriteWidgets: "Favorite Widgets",
       projects: "Projects",
-      explore: "Echoes",
+      explore: "Public shares",
       canvasAgentChooseModel: "Choose model",
       shortcutPenHelp: "Select the pen to write on the canvas.",
       canvasAgentShort: "Agent",
@@ -12128,10 +12128,6 @@ User writes “我需要根据地点, 显示空气质量”, names a place, and 
             favoriteCommunityItemId:widget.favoriteCommunityItemId || null,
           } }));
         },
-      });
-      items.push({
-        key:`widget:${widget.id}:tool-echo`, kind:"echo", label:"Echo", baseWidth:28, iconOnly:true,
-        activate:() => window.dispatchEvent(new CustomEvent("penecho:community-widget-action", {detail:{action:"echo",widgetId:widget.id}})),
       });
       const liveShared = window.PenEchoLiveShareStatus?.widgetShared?.(widget.id, widget.shareSourceId) === true;
       items.push({
@@ -41237,6 +41233,7 @@ var canvasDocumentIdentity = (() => {
     exampleCoachTip = document.querySelector("#exampleCoachTip"),
     exampleCoachAll = document.querySelector("#exampleCoachAll"),
     exampleCoachHide = document.querySelector("#exampleCoachHide"),
+    exampleCoachSetup = document.querySelector("#exampleCoachSetup"),
     exampleDone = document.querySelector("#exampleDone"),
     exampleDoneTitle = document.querySelector("#exampleDoneTitle"),
     exampleDoneBody = document.querySelector("#exampleDoneBody"),
@@ -41442,6 +41439,20 @@ var canvasDocumentIdentity = (() => {
     exampleSaveProgress(EXAMPLES.setGoal(exampleProgress(), goal));
   }
 
+  // Instant examples run locally. The others only teach anything when a model
+  // produces the real result; without one, Notes would fall back to a card that
+  // just holds the photo and the Agent would refuse.
+  function exampleModelReady(scenario) {
+    if (!scenario || scenario.route === "instant") return true;
+    if (scenario.route === "agent" && typeof canvasAgentExecutionAvailable === "function" && !canvasAgentExecutionAvailable()) return false;
+    return typeof hasSelectedAiConnection !== "function" || hasSelectedAiConnection();
+  }
+  function openExampleAiSetup() {
+    closeExamplesDialog();
+    if (!settings.open) openSettings();
+    requestAnimationFrame(() => document.querySelector("#settingsNavConnections")?.click());
+    setStatus(exampleCopy("Connect an AI model, then tap the highlighted step again.", "请先连接 AI 模型，再点击高亮的步骤。"));
+  }
   function exampleSessionCurrent() {
     const session = exampleCanvases.session;
     return session && canvasDocumentsCurrent()?.id === session.documentId ? session : null;
@@ -41616,6 +41627,11 @@ var canvasDocumentIdentity = (() => {
       endExampleSession();
       return false;
     }
+    // Without a model this example cannot show its real result; set one up first.
+    if (!exampleModelReady(scenario) && !(id === "plot" && scenario.graph) && !(id === "diagram" && scenario.architecture)) {
+      openExampleAiSetup();
+      return true;
+    }
     session.status = "running";
     if (target) target.example = true;
     hideExampleCoach();
@@ -41665,9 +41681,15 @@ var canvasDocumentIdentity = (() => {
       finishExample(session);
     }, 600);
   }
-  function exampleAgentSubmitted() {
+  function exampleAgentSubmitted(event) {
     const session = exampleSessionCurrent();
     if (!session || session.status !== "waiting" || EXAMPLES.get(session.id)?.route !== "agent") return;
+    if (!exampleModelReady(EXAMPLES.get(session.id))) {
+      event?.preventDefault();
+      event?.stopImmediatePropagation();
+      openExampleAiSetup();
+      return;
+    }
     session.status = "running";
     hideExampleCoach();
     exampleSaveProgress(EXAMPLES.markTried(exampleProgress(), session.id));
@@ -41714,7 +41736,12 @@ var canvasDocumentIdentity = (() => {
       suggestOff = scenario.route !== "agent" && !smartSuggestActive();
     exampleCoachKicker.textContent = `${exampleGoalLabel(scenario.category)} · ${exampleCopy(`${number} of ${group.length}`, `${number}/${group.length}`)} · ${exampleFeatureLabel(scenario.feature)}`;
     exampleCoachTitle.textContent = exampleText(scenario.title);
-    exampleCoachBody.textContent = suggestOff ? exampleCopy("Suggestions are turned off. Turn them on in Settings, or tap the AI button to try this example.", "建议已关闭。请在设置中开启，或点击 AI 按钮体验此示例。") : exampleText(scenario.coach);
+    const needsModel = !exampleModelReady(scenario) && !scenario.graph && !scenario.architecture;
+    exampleCoachBody.textContent = needsModel
+      ? exampleCopy("This example needs an AI model to produce the real result, and none is connected yet. Set one up, then try it.", "此示例需要 AI 模型才能生成真实结果，目前尚未连接。请先设置，再来体验。")
+      : suggestOff ? exampleCopy("Suggestions are turned off. Turn them on in Settings, or tap the AI button to try this example.", "建议已关闭。请在设置中开启，或点击 AI 按钮体验此示例。") : exampleText(scenario.coach);
+    exampleCoachSetup.hidden = !needsModel;
+    exampleCoachSetup.textContent = exampleCopy("Set up AI", "设置 AI");
     exampleCoachTip.textContent = exampleText(scenario.tip);
     exampleCoachTip.hidden = !scenario.tip || scenario.route === "agent";
     exampleCoachAll.textContent = exampleCopy("All examples", "全部示例");
@@ -41742,7 +41769,9 @@ var canvasDocumentIdentity = (() => {
     const target = exampleCoachTarget(session, scenario);
     if (!target?.rect || !TOUR.rectHasArea(target.rect)) { exampleCoach.hidden = true; return; }
     const wasHidden = exampleCoach.hidden;
-    if (wasHidden) renderExampleCoach();
+    // Connecting a model while the coachmark is up swaps "Set up AI" for the steps.
+    const ready = exampleModelReady(scenario);
+    if (wasHidden || exampleCanvases.coachReady !== ready) { exampleCanvases.coachReady = ready; renderExampleCoach(); }
     exampleCoach.hidden = false;
     const card = pageLayoutRect(exampleCoach),
       position = TOUR.placeCoachmark(target.rect, { width:card.width, height:card.height }, featureTourViewport(), target.placement, { margin:12, gap:14, arrowMargin:22 }),
@@ -41789,6 +41818,7 @@ var canvasDocumentIdentity = (() => {
     });
     exampleCoachAll?.addEventListener("click", openExamplesDialog);
     exampleCoachHide?.addEventListener("click", () => { exampleCanvases.coachHidden = true; hideExampleCoach(); });
+    exampleCoachSetup?.addEventListener("click", openExampleAiSetup);
     exampleCoach?.addEventListener("keydown", event => { if (event.key === "Escape") { exampleCanvases.coachHidden = true; hideExampleCoach(); } });
     for (const element of [exampleCoach, exampleDone]) element?.addEventListener("pointerdown", event => event.stopPropagation());
     exampleDoneNext?.addEventListener("click", () => { const next = exampleDone.dataset.nextId; if (next) void openExampleCanvas(next); });
